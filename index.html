@@ -313,8 +313,42 @@
             </div>
         </section>
 
+        <!-- Payment Gateways Section (MỚI THÊM) -->
+        <section class="py-16 bg-gray-900/30 border-t border-b border-gray-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+                <h3 class="text-sm font-bold text-gray-400 uppercase tracking-widest mb-8">Hỗ Trợ Đầy Đủ Cổng Thanh Toán Nội Địa</h3>
+                <div class="flex flex-wrap justify-center items-center gap-6 md:gap-10 opacity-70 grayscale hover:grayscale-0 transition-all duration-500">
+                    <!-- Momo -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-pink-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-[#A50064] flex items-center justify-center text-white font-bold text-xs shadow-lg shadow-pink-500/20">MoMo</div>
+                        <span class="text-gray-300 font-semibold text-sm">Ví MoMo</span>
+                    </div>
+                    <!-- VNPay -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-blue-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-blue-600 flex items-center justify-center text-white font-bold text-xs italic shadow-lg shadow-blue-600/20">VN</div>
+                        <span class="text-gray-300 font-semibold text-sm">VNPay QR</span>
+                    </div>
+                    <!-- ZaloPay -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-blue-400/50 transition">
+                        <div class="w-10 h-10 rounded bg-blue-500 flex items-center justify-center text-white font-bold text-xs shadow-lg shadow-blue-500/20">Zalo</div>
+                        <span class="text-gray-300 font-semibold text-sm">ZaloPay</span>
+                    </div>
+                    <!-- VietQR / Napas -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-green-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-green-600 flex items-center justify-center text-white font-bold text-[10px] shadow-lg shadow-green-600/20">VietQR</div>
+                        <span class="text-gray-300 font-semibold text-sm">Chuyển Khoản 24/7</span>
+                    </div>
+                    <!-- Thẻ nội địa -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-gray-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-gray-700 flex items-center justify-center text-white"><i class="fa-solid fa-credit-card"></i></div>
+                        <span class="text-gray-300 font-semibold text-sm">Thẻ ATM Nội Địa</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- Compliance & Policy Footer (Chuẩn BCT) -->
-        <footer class="bg-gray-950 border-t border-gray-900 py-12 mt-10">
+        <footer class="bg-gray-950 border-t border-gray-900 py-12">
             <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
                     <div>
@@ -518,7 +552,6 @@
                         </div>
                     </div>
                     
-                    <!-- Đã xóa phần "resultButtons" ở đây theo yêu cầu -->
                 </div>
             </div>
         </div>
@@ -637,8 +670,10 @@
         const API_URL = `http://${VPS_IP}:5000`;
         
         // CONFIG TELEGRAM INTEGRATION
-        const TELEGRAM_BOT_TOKEN = "8987136141:AAHYdxo8iDCEKV80C17P-Y2K3KbXjzYuCHQ";
-        const TELEGRAM_CHAT_ID = "7977790389";
+        // [CẢNH BÁO BẢO MẬT] Đã xóa Token thật để tránh bị GitGuardian quét và khóa tài khoản của bạn trên GitHub.
+        // BẠN PHẢI chuyển phần logic gửi API tới Telegram vào phần máy chủ (Backend Python/Nodejs). Tuyệt đối không để Token trên Frontend.
+        const TELEGRAM_BOT_TOKEN = ""; 
+        const TELEGRAM_CHAT_ID = ""; 
         let userMessageCount = 0; 
         
         // BIẾN LƯU TRỮ VÀ LẮNG NGHE TIN NHẮN TỪ ADMIN
@@ -751,6 +786,7 @@
         
         async function fetchAdminReplies() {
             try {
+                if(!TELEGRAM_BOT_TOKEN) return; // Bỏ qua nếu không có Token
                 const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}`;
                 const res = await fetch(url);
                 const data = await res.json();
@@ -813,6 +849,7 @@
         }
 
         async function sendToTelegramAPI(text, user) {
+            if(!TELEGRAM_BOT_TOKEN) return; // Bỏ qua nếu không có Token
             const message = `🌐 *TIN NHẮN HỖ TRỢ TỪ WEB*\n👤 *Người dùng:* ${user}\n💬 *Nội dung:* ${text}`;
             const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
             try {
