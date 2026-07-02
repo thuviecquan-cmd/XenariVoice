@@ -666,14 +666,8 @@
 
     <script>
         // CONFIG 
-        // ----------------------------------------------------------------------
-        // CẢNH BÁO BẢO MẬT KHI CHẠY HTTPS TRÊN ĐỊA CHỈ IP:
-        // Nếu VPS_IP bên dưới vẫn là địa chỉ IP (vd: 161.248.147.91) thì trình duyệt 
-        // sẽ cảnh báo "Kết nối không an toàn" vì chứng chỉ tạo tự động là Self-signed. 
-        // Bạn nên gắn một Domain (tên miền) vào IP này và tạo chứng chỉ SSL thực để hết cảnh báo.
-        // ----------------------------------------------------------------------
         const VPS_IP = "161.248.147.91";
-        const API_URL = `https://${VPS_IP}:5000`; // ĐÃ NÂNG CẤP LÊN HTTPS
+        const API_URL = `http://${VPS_IP}:5000`;
         
         // CONFIG TELEGRAM INTEGRATION
         // [CẢNH BÁO BẢO MẬT] Đã xóa Token thật để tránh bị GitGuardian quét và khóa tài khoản của bạn trên GitHub.
@@ -945,7 +939,7 @@
                     container.innerHTML = `<p class="col-span-2 text-gray-500 text-sm">Chưa có giọng mẫu từ server.</p>`;
                 }
             } catch(e) {
-                document.getElementById('presetVoicesContainer').innerHTML = `<p class="col-span-2 text-red-400 text-sm">Mất kết nối máy chủ giọng mẫu hoặc chưa cấp quyền hiển thị chứng chỉ Self-signed (Hãy mở ${API_URL} trong tab mới và click "Tiếp tục").</p>`;
+                document.getElementById('presetVoicesContainer').innerHTML = `<p class="col-span-2 text-red-400 text-sm">Mất kết nối máy chủ giọng mẫu.</p>`;
             }
         }
 
@@ -1013,7 +1007,7 @@
                         }
                     }
                 } else if(!isAuto) { err.innerText = data.message; err.classList.remove('hidden'); }
-            } catch (e) { if(!isAuto) { err.innerText = "Lỗi máy chủ! Vui lòng kiểm tra lại kết nối HTTPS."; err.classList.remove('hidden'); } }
+            } catch (e) { if(!isAuto) { err.innerText = "Lỗi máy chủ!"; err.classList.remove('hidden'); } }
         }
 
         function logout() { localStorage.clear(); location.reload(); }
