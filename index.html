@@ -1,558 +1,1484 @@
-# -*- coding: utf-8 -*-
-import os
-import sys
-import subprocess
-import json
-import time
-import logging
-import threading
-import zipfile
-import io
-import re
-import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk, filedialog
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from werkzeug.serving import make_server
-import requests
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xenari Voice - Nền tảng Nhân bản & Tạo Giọng nói AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --primary: #6366f1; /* Indigo */
+            --primary-hover: #4f46e5;
+            --secondary: #10b981; /* Emerald */
+            --bg-dark: #030712;
+            --bg-card: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+        }
 
-# =======================================================
-# CẤU HÌNH TRẠM GÁC (JSONBIN) ĐỂ ĐỒNG BỘ TỰ ĐỘNG
-# =======================================================
-# 1. Điền BIN_ID của bạn vào đây (ví dụ: 668a1b1fecd3cb3090623a8e)
-JSONBIN_BIN_ID = "6a46d58df5f4af5e29566991" 
+        body { 
+            background-color: var(--bg-dark); 
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.08), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.08), transparent 25%);
+            background-attachment: fixed;
+            color: #f8fafc; 
+            font-family: 'Inter', sans-serif; 
+            overflow-x: hidden;
+            scroll-behavior: smooth;
+        }
 
-# 2. Master Key bạn đã cung cấp
-JSONBIN_API_KEY = "$2a$10$Kfk6adpy2bkyaPMTwzJPAO/byj6LP8TUcZRXuxHGXZ1/N9fsPDAGe"
-
-
-# =======================================================
-# KHỐI TỰ ĐỘNG CÀI ĐẶT THƯ VIỆN & CẬP NHẬT CODE
-# =======================================================
-AUTO_UPDATE_URL = "" 
-
-def kiem_tra_va_cai_dat_thu_vien():
-    thu_vien_can_thiet = ["flask", "flask-cors", "requests", "werkzeug"]
-    cai_moi = False
-    try:
-        import flask
-        import flask_cors
-        import requests
-        import werkzeug
-    except ImportError:
-        cai_moi = True
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
         
-    if cai_moi:
-        print("🚀 HỆ THỐNG ĐANG TỰ ĐỘNG TẢI & CÀI ĐẶT THƯ VIỆN PIP (Vui lòng chờ)...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + thu_vien_can_thiet)
-        print("✅ Cài đặt thư viện hoàn tất!\n")
-        os.execv(sys.executable, ['python'] + sys.argv)
-
-def tu_dong_cap_nhat_code():
-    if not AUTO_UPDATE_URL: return
-    try:
-        response = requests.get(AUTO_UPDATE_URL, timeout=5)
-        if response.status_code == 200:
-            new_code = response.text
-            with open(__file__, "r", encoding="utf-8") as f:
-                old_code = f.read()
-            if new_code.strip() != old_code.strip():
-                with open(__file__, "w", encoding="utf-8") as f:
-                    f.write(new_code)
-                os.execv(sys.executable, ['python'] + sys.argv)
-    except: pass
-
-kiem_tra_va_cai_dat_thu_vien()
-tu_dong_cap_nhat_code()
-
-# ----- CẤU HÌNH CÔNG CỤ -----
-FRP_VERSION = "0.51.3"
-FRP_FILENAME = f"frp_{FRP_VERSION}_windows_amd64.zip"
-FRP_URL = f"https://github.com/fatedier/frp/releases/download/v{FRP_VERSION}/{FRP_FILENAME}"
-SERVER_EXE = "frps.exe"
-SERVER_INI = "frps.ini"
-
-# Cấu hình Cloudflare
-CLOUDFLARED_EXE = "cloudflared.exe"
-CLOUDFLARED_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-
-DATA_FILE = "active_nodes_data.json" 
-USERS_FILE = "users_data.json" 
-PRESETS_FILE = "preset_voices.json"
-PRESET_AUDIO_DIR = "preset_audios"
-
-MAX_LIFETIME_SECONDS = 16800  
-
-if not os.path.exists(PRESET_AUDIO_DIR):
-    os.makedirs(PRESET_AUDIO_DIR)
-
-active_nodes = {}
-active_nodes_lock = threading.Lock()
-
-users_data = {}
-users_lock = threading.Lock()
-
-preset_voices = []
-presets_lock = threading.Lock()
-
-# ----- HỆ THỐNG LƯU TRỮ (PERSISTENCE) -----
-def load_data():
-    global active_nodes, users_data, preset_voices
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f: active_nodes.update(json.load(f))
-        except: pass
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, "r", encoding="utf-8") as f: users_data.update(json.load(f))
-        except: pass
-    if os.path.exists(PRESETS_FILE):
-        try:
-            with open(PRESETS_FILE, "r", encoding="utf-8") as f: preset_voices = json.load(f)
-        except: pass
-    else:
-        preset_voices = [
-            {"id": "v1", "name": "Nam miền Bắc", "filename": "sample_bac_nam.mp3", "description": "Hào sảng, rõ lời, ấm áp"},
-            {"id": "v2", "name": "Nữ miền Nam", "filename": "sample_nu_nam.mp3", "description": "Dễ thương, truyền cảm"}
-        ]
-        save_presets_data()
-
-def save_active_nodes():
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f: json.dump(active_nodes, f, ensure_ascii=False, indent=4)
-    except: pass
-
-def save_users_data():
-    try:
-        with open(USERS_FILE, "w", encoding="utf-8") as f: json.dump(users_data, f, ensure_ascii=False, indent=4)
-    except: pass
-
-def save_presets_data():
-    try:
-        with open(PRESETS_FILE, "w", encoding="utf-8") as f: json.dump(preset_voices, f, ensure_ascii=False, indent=4)
-    except: pass
-
-load_data()
-
-# ----- FLASK API SERVER -----
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}) 
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  
-
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
-banned_ips = set()
-ip_requests = {}
-MAX_REQUESTS_PER_MINUTE = 60
-
-@app.before_request
-def anti_bot_firewall():
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    if client_ip in banned_ips: return "BANNED", 403
-    if client_ip == "127.0.0.1": return
-    
-    now = time.time()
-    if client_ip not in ip_requests: ip_requests[client_ip] = []
-    ip_requests[client_ip] = [t for t in ip_requests[client_ip] if now - t < 60]
-    ip_requests[client_ip].append(now)
-    
-    if len(ip_requests[client_ip]) > MAX_REQUESTS_PER_MINUTE:
-        banned_ips.add(client_ip)
-        return "BANNED", 429
-
-@app.route('/get_preset_voices', methods=['GET'])
-def get_preset_voices_api():
-    with presets_lock: return jsonify({"voices": preset_voices})
-
-@app.route('/preset-audio/<filename>', methods=['GET'])
-def play_preset_audio(filename):
-    return send_from_directory(PRESET_AUDIO_DIR, filename)
-
-@app.route('/auth', methods=['POST'])
-def auth_user():
-    data = request.json
-    username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
-    mode = data.get('mode', 'login')
-    
-    if not username or not password:
-        return jsonify({"status": "error", "message": "Thiếu thông tin đăng nhập"}), 400
+        /* Pro Card Style */
+        .pro-card { 
+            background: var(--bg-card); 
+            border: 1px solid var(--border-color); 
+            border-radius: 20px; 
+            backdrop-filter: blur(16px); 
+            -webkit-backdrop-filter: blur(16px);
+            box-shadow: 0 10px 40px -10px rgba(0,0,0,0.5);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
         
-    with users_lock:
-        if mode == 'login':
-            if username in users_data:
-                if users_data[username]['password'] == password:
-                    return jsonify({"status": "success", "credits": users_data[username]['credits']})
-                else: return jsonify({"status": "error", "message": "Sai mật khẩu!"}), 401
-            else: return jsonify({"status": "error", "message": "Tài khoản không tồn tại!"}), 404
-        
-        elif mode == 'register':
-            if username in users_data: return jsonify({"status": "error", "message": "Tên tài khoản này đã được sử dụng!"}), 409
-            users_data[username] = {
-                "password": password, 
-                "fullname": data.get('fullname', ''),
-                "credits": 1000
-            }
-            save_users_data()
-            if app.config.get('UI_APP'): app.config['UI_APP'].master.after(0, app.config['UI_APP'].update_users_list)
-            return jsonify({"status": "success", "credits": 1000, "message": "Đăng ký thành công!"})
+        /* Đồng nhất thao tác bấm trên Button: Không cho click nhầm vào chữ/icon bên trong */
+        button { position: relative; }
+        button > * { pointer-events: none; }
+        button:active { transform: scale(0.98); transition: transform 0.1s; }
 
-@app.route('/deduct', methods=['POST'])
-def deduct_credits():
-    data = request.json
-    username = data.get('username', '')
-    password = data.get('password', '')
-    chars_count = data.get('chars_count', 0)
-    
-    with users_lock:
-        if username not in users_data or users_data[username]['password'] != password:
-            return jsonify({"status": "error", "message": "Xác thực tài khoản thất bại"}), 401
-        if users_data[username]['credits'] < chars_count:
-            return jsonify({"status": "error", "message": f"Không đủ ký tự để tạo! Cần: {chars_count:,}"}), 402
+        .glow-button {
+            background: linear-gradient(135deg, var(--primary), #8b5cf6);
+            box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+            transition: all 0.3s ease;
+        }
+        .glow-button:hover {
+            box-shadow: 0 0 30px rgba(99, 102, 241, 0.7);
+            transform: translateY(-2px);
+        }
+
+        /* Hero Text Gradient */
+        .text-gradient {
+            background: linear-gradient(to right, #818cf8, #c084fc, #34d399);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        input[type=range] { accent-color: var(--primary); }
+        .modal-bg { background: rgba(3, 7, 18, 0.95); backdrop-filter: blur(12px); }
+        
+        /* Audio Visualizer */
+        @keyframes wave {
+            0%, 100% { height: 15%; opacity: 0.5;}
+            50% { height: 100%; opacity: 1;}
+        }
+        .visualizer { display: flex; align-items: flex-end; gap: 3px; height: 40px; justify-content: center; }
+        .bar { width: 6px; background: var(--secondary); border-radius: 3px; transition: height 0.1s ease; }
+        
+        .playing .bar { animation: wave 1s ease-in-out infinite; }
+        .playing .bar:nth-child(1) { animation-delay: 0.0s; }
+        .playing .bar:nth-child(2) { animation-delay: 0.2s; }
+        .playing .bar:nth-child(3) { animation-delay: 0.4s; }
+        .playing .bar:nth-child(4) { animation-delay: 0.1s; }
+        .playing .bar:nth-child(5) { animation-delay: 0.3s; }
+        .playing .bar:nth-child(6) { animation-delay: 0.5s; }
+        .playing .bar:nth-child(7) { animation-delay: 0.2s; }
+        
+        .voice-card { border: 1px solid var(--border-color); transition: all 0.2s; }
+        .voice-card.active { border-color: var(--primary); background: rgba(99, 102, 241, 0.1); box-shadow: 0 0 15px rgba(99, 102, 241, 0.2); }
+
+        /* Status Dot */
+        .status-dot { height: 8px; width: 8px; background-color: var(--secondary); border-radius: 50%; display: inline-block; box-shadow: 0 0 8px var(--secondary); animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); } 70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+
+        /* Loader */
+        .loader-line { width: 100%; height: 3px; background: #1e293b; border-radius: 3px; overflow: hidden; }
+        .loader-line-inner { height: 100%; background: var(--primary); width: 0%; transition: width 0.4s ease; }
+        
+        /* Custom Audio Scrubber */
+        #customScrubber { background: #374151; }
+        #customScrubber::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; }
+        #customScrubber::-webkit-slider-thumb { appearance: none; width: 16px; height: 16px; background: #8b5cf6; border-radius: 50%; margin-top: -5px; box-shadow: 0 0 10px rgba(139, 92, 246, 0.8); transition: transform 0.1s; cursor: pointer;}
+        #customScrubber::-webkit-slider-thumb:hover { transform: scale(1.2); }
+        
+        /* Chat Widget Animations */
+        .chat-bubble-btn { 
+            animation: bounce-slow 3s ease-in-out infinite; 
+            box-shadow: 0 0 25px rgba(16, 185, 129, 0.5);
+        }
+        @keyframes bounce-slow {
+            0%, 100% { transform: translateY(0) scale(1); }
+            50% { transform: translateY(-8px) scale(1.05); }
+        }
+        .chat-window { transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1); transform-origin: bottom right; }
+        .chat-hidden { transform: scale(0); opacity: 0; pointer-events: none !important; }
+        .chat-visible { transform: scale(1); opacity: 1; pointer-events: auto !important; }
+        
+        /* Hiệu ứng hiển thị tin nhắn mới mượt mà */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <div id="toastContainer" class="fixed top-4 right-4 z-[100] space-y-2 pointer-events-none"></div>
+
+    <!-- NAVBAR DÙNG CHUNG -->
+    <nav class="border-b border-gray-800 bg-gray-950/80 backdrop-blur-lg sticky top-0 z-40">
+        <div class="max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-12 h-20 flex items-center justify-between">
+            <div class="flex items-center gap-4 cursor-pointer" onclick="goToLanding()">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+                    <i class="fa-solid fa-wave-square text-white text-xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400 tracking-tight">Xenari<span class="text-indigo-400">Voice</span></h1>
+                    <p class="text-xs text-indigo-300/70 font-medium tracking-widest uppercase">Studio Cấp Chuyên Nghiệp</p>
+                </div>
+            </div>
             
-        users_data[username]['credits'] -= chars_count
-        save_users_data()
-        
-        if app.config.get('UI_APP'): app.config['UI_APP'].master.after(0, app.config['UI_APP'].update_users_list)
-        return jsonify({"status": "success", "credits": users_data[username]['credits']})
+            <!-- Hiển thị khi khách viếng thăm trang giới thiệu -->
+            <div id="guestNav" class="flex items-center gap-4">
+                <a href="#features" class="hidden md:block text-sm font-semibold text-gray-300 hover:text-white transition">Tính năng</a>
+                <a href="#pricing" class="hidden md:block text-sm font-semibold text-gray-300 hover:text-white transition mr-4">Bảng giá</a>
+                <button onclick="openStudio()" class="bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white px-5 py-2.5 rounded-full font-semibold text-sm transition-all hidden sm:block">
+                    Đăng Nhập
+                </button>
+                <button onclick="openStudio()" class="glow-button text-white px-6 py-2.5 rounded-full font-bold text-sm transition-all flex items-center gap-2">
+                    Vào Studio <i class="fa-solid fa-arrow-right"></i>
+                </button>
+            </div>
 
-class ServerThread(threading.Thread):
-    def __init__(self, app):
-        threading.Thread.__init__(self)
-        self.server = make_server('0.0.0.0', 5000, app)
-        self.ctx = app.app_context()
-        self.ctx.push()
-    def run(self): self.server.serve_forever()
-    def shutdown(self): self.server.shutdown()
+            <!-- Hiển thị khi người dùng đã đăng nhập và vào Studio -->
+            <div id="userNav" class="hidden items-center gap-6">
+                <!-- Nút Quay lại Studio chỉ hiện khi user đang ở Landing Page -->
+                <button id="btnBackToStudio" onclick="openStudio()" class="hidden bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-full font-semibold text-sm transition-all items-center gap-2 shadow-lg shadow-indigo-500/30">
+                    <i class="fa-solid fa-microphone-lines"></i> Vào Studio
+                </button>
 
-# ----- GIAO DIỆN CHÍNH QUẢN TRỊ (ADMIN PANEL) -----
-class SmartCoordinatorApp:
-    def __init__(self, master):
-        self.master = master
-        self.process_frp = None
-        self.process_cf = None
-        self.flask_thread = None
-        
-        master.title("OmniVoice Pro Smart Hub - Trung Tâm Điều Phối (Tự động kết nối Web)")
-        master.geometry("1100x700" if sys.platform != "win32" else "1150x730")
-        master.configure(bg="#f4f6f9")
-        app.config['UI_APP'] = self
-
-        self.notebook = ttk.Notebook(master)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background="#e1e4e8")
-        style.configure("Treeview", rowheight=25, font=("Segoe UI", 10))
-
-        # --- TAB 1: QUẢN LÝ MẠNG VÀ CÁC NODE WORKERS ---
-        self.tab_system = tk.Frame(self.notebook, bg="#ffffff")
-        self.notebook.add(self.tab_system, text="📡 Hệ thống mạng & Nodes")
-
-        net_frame = tk.LabelFrame(self.tab_system, text="1. Điều khiển FRP Server & Mạng Cloudflare HTTPS", padx=15, pady=10, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        net_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        tk.Label(net_frame, text="Trạng thái Trạm Gác (Website):", bg="#ffffff", fg="#0d6efd", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.cf_url_entry = tk.Entry(net_frame, width=45, font=("Consolas", 10, "bold"), fg="green")
-        self.cf_url_entry.insert(0, "Đang chờ bật trạm...")
-        self.cf_url_entry.grid(row=0, column=1, padx=5, pady=5)
-        
-        self.start_btn = tk.Button(net_frame, text="▶ KHỞI ĐỘNG TRẠM TRUNG TÂM (TỰ ĐỘNG KẾT NỐI)", command=self.toggle_server, bg="#198754", fg="white", font=("Segoe UI", 10, "bold"), height=2, relief=tk.FLAT)
-        self.start_btn.grid(row=1, column=0, columnspan=3, pady=10, sticky="we")
-
-        node_frame = tk.LabelFrame(self.tab_system, text="2. Danh sách Worker Nodes kết nối", padx=15, pady=10, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        node_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        columns = ("Node", "FRP Link", "Cloudflare Link", "Kênh Ưu Tiên", "Uptime", "Trạng thái")
-        self.tree_nodes = ttk.Treeview(node_frame, columns=columns, show="headings", height=6)
-        for col in columns:
-            self.tree_nodes.heading(col, text=col)
-            self.tree_nodes.column(col, width=150 if "Link" in col else 90, anchor=tk.CENTER)
-        self.tree_nodes.pack(fill=tk.BOTH, expand=True)
-
-        # --- TAB 2 & 3: TÀI KHOẢN VÀ GIỌNG MẪU ---
-        self.setup_users_tab()
-        self.setup_presets_tab()
-
-        # --- LOG ---
-        log_frame = tk.LabelFrame(master, text="Nhật ký hệ thống (System Logs)", padx=10, pady=5, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, state='disabled', wrap=tk.WORD, bg="#1e1e1e", fg="#39ff14", font=("Consolas", 9), height=7)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.update_users_list()
-        self.update_presets_list()
-        
-        self.check_and_download_tools()
-
-    def setup_users_tab(self):
-        self.tab_users = tk.Frame(self.notebook, bg="#ffffff")
-        self.notebook.add(self.tab_users, text="👥 Quản lý người dùng & Credits")
-
-        left_user_frame = tk.LabelFrame(self.tab_users, text="Danh sách thành viên", padx=10, pady=10, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        left_user_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        right_action_frame = tk.LabelFrame(self.tab_users, text="Hành động & Giao dịch", padx=15, pady=15, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        right_action_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=10)
-
-        user_cols = ("Tên tài khoản", "Mật khẩu", "Tín dụng (Credits)")
-        self.tree_users = ttk.Treeview(left_user_frame, columns=user_cols, show="headings")
-        for ucol in user_cols:
-            self.tree_users.heading(ucol, text=ucol)
-            self.tree_users.column(ucol, width=150, anchor=tk.CENTER)
-        self.tree_users.pack(fill=tk.BOTH, expand=True)
-        self.tree_users.bind("<<TreeviewSelect>>", self.on_user_select)
-
-        tk.Label(right_action_frame, text="Tài khoản:", bg="#ffffff").grid(row=0, column=0, sticky="w", pady=5)
-        self.entry_username = tk.Entry(right_action_frame, width=25)
-        self.entry_username.grid(row=0, column=1, pady=5)
-
-        tk.Label(right_action_frame, text="Mật khẩu:", bg="#ffffff").grid(row=1, column=0, sticky="w", pady=5)
-        self.entry_password = tk.Entry(right_action_frame, width=25)
-        self.entry_password.grid(row=1, column=1, pady=5)
-
-        tk.Label(right_action_frame, text="Ký tự:", bg="#ffffff").grid(row=2, column=0, sticky="w", pady=5)
-        self.entry_credits_amount = tk.Entry(right_action_frame, width=25)
-        self.entry_credits_amount.insert(0, "100000")
-        self.entry_credits_amount.grid(row=2, column=1, pady=5)
-
-        tk.Button(right_action_frame, text="➕ Thêm / Sửa", command=self.ui_add_user, bg="#198754", fg="white", font=("Segoe UI", 9, "bold")).grid(row=3, column=0, columnspan=2, pady=10, sticky="we")
-        tk.Button(right_action_frame, text="💰 CỘNG CREDITS", command=lambda: self.ui_adjust_credits(True), bg="#ffc107", fg="black", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=2, pady=5, sticky="we")
-        tk.Button(right_action_frame, text="➖ TRỪ CREDITS", command=lambda: self.ui_adjust_credits(False), bg="#fd7e14", fg="white", font=("Segoe UI", 9, "bold")).grid(row=5, column=0, columnspan=2, pady=5, sticky="we")
-
-    def setup_presets_tab(self):
-        self.tab_presets = tk.Frame(self.notebook, bg="#ffffff")
-        self.notebook.add(self.tab_presets, text="🎙️ Thư viện Giọng mẫu chuẩn")
-
-        left_preset_frame = tk.LabelFrame(self.tab_presets, text="Danh sách giọng nói chuẩn", padx=10, pady=10, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        left_preset_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        right_preset_action = tk.LabelFrame(self.tab_presets, text="Thêm Giọng mẫu mới", padx=15, pady=15, bg="#ffffff", font=("Segoe UI", 10, "bold"))
-        right_preset_action.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=10)
-
-        preset_cols = ("ID Giọng", "Tên hiển thị", "Tệp", "Mô tả")
-        self.tree_presets = ttk.Treeview(left_preset_frame, columns=preset_cols, show="headings")
-        for pcol in preset_cols:
-            self.tree_presets.heading(pcol, text=pcol)
-            self.tree_presets.column(pcol, width=120, anchor=tk.CENTER)
-        self.tree_presets.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(right_preset_action, text="Tên giọng:", bg="#ffffff").grid(row=0, column=0, sticky="w", pady=5)
-        self.entry_preset_name = tk.Entry(right_preset_action, width=25)
-        self.entry_preset_name.grid(row=0, column=1, pady=5)
-
-        tk.Label(right_preset_action, text="Mô tả:", bg="#ffffff").grid(row=1, column=0, sticky="w", pady=5)
-        self.entry_preset_desc = tk.Entry(right_preset_action, width=25)
-        self.entry_preset_desc.grid(row=1, column=1, pady=5)
-
-        self.lbl_selected_file = tk.Label(right_preset_action, text="Chưa chọn tệp...", fg="red", bg="#ffffff", font=("Segoe UI", 9, "italic"))
-        self.lbl_selected_file.grid(row=2, column=0, columnspan=2, pady=5, sticky="w")
-        
-        tk.Button(right_preset_action, text="📁 Chọn File", command=self.ui_browse_preset, bg="#6c757d", fg="white").grid(row=3, column=0, columnspan=2, pady=5, sticky="we")
-        tk.Button(right_preset_action, text="💾 Thêm Giọng", command=self.ui_add_preset, bg="#0d6efd", fg="white", font=("Segoe UI", 10, "bold")).grid(row=4, column=0, columnspan=2, pady=10, sticky="we")
-        tk.Button(right_preset_action, text="🗑️ Xóa Giọng", command=self.ui_delete_preset, bg="#dc3545", fg="white", font=("Segoe UI", 10, "bold")).grid(row=5, column=0, columnspan=2, pady=5, sticky="we")
-        self.selected_preset_filepath = ""
-
-    def log(self, message):
-        self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
-        self.log_text.see(tk.END)
-        self.log_text.config(state='disabled')
-        self.master.update_idletasks()
-
-    def check_and_download_tools(self):
-        tools_to_dl = []
-        if not os.path.exists(SERVER_EXE): tools_to_dl.append(("FRP Server", FRP_URL, True))
-        if not os.path.exists(CLOUDFLARED_EXE): tools_to_dl.append(("Cloudflare Tunnel", CLOUDFLARED_URL, False))
-        if tools_to_dl:
-            threading.Thread(target=self._download_tools, args=(tools_to_dl,), daemon=True).start()
-
-    def _download_tools(self, tools):
-        for name, url, is_zip in tools:
-            try:
-                self.log(f"Đang tải {name}...")
-                r = requests.get(url, stream=True)
-                if is_zip:
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                        for file_info in zf.infolist():
-                            if file_info.filename.endswith(SERVER_EXE):
-                                with open(SERVER_EXE, 'wb') as f: f.write(zf.read(file_info))
-                else:
-                    with open(CLOUDFLARED_EXE, 'wb') as f: f.write(r.content)
-                self.log(f"✅ Đã tải thành công {name}")
-            except Exception as e:
-                self.log(f"⚠️ Lỗi tải {name}: {e}")
-
-    def toggle_server(self):
-        if self.process_frp or self.flask_thread or self.process_cf: self.stop_server()
-        else: self.start_server()
-
-    def start_server(self):
-        if not self.flask_thread:
-            self.flask_thread = ServerThread(app)
-            self.flask_thread.start()
-            self.log("✅ API Server khởi động tại cổng 5000.")
-
-        if os.path.exists(SERVER_EXE):
-            frp_config = "[common]\nbind_port = 7000\ntcp_mux = true\nmax_pool_count = 50\ntoken = OmniVoiceSecret2026\n"
-            with open(SERVER_INI, "w", encoding="utf-8") as f: f.write(frp_config)
-            self.process_frp = subprocess.Popen([f".\\{SERVER_EXE}", "-c", f".\\{SERVER_INI}"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-            self.log("✅ FRP Server đã chạy thành công tại cổng 7000.")
-
-        if os.path.exists(CLOUDFLARED_EXE):
-            self.log("🌐 Đang khởi tạo đường hầm Cloudflare...")
-            self.cf_url_entry.delete(0, tk.END)
-            self.cf_url_entry.insert(0, "Đang lấy link HTTPS...")
-            self.process_cf = subprocess.Popen([f".\\{CLOUDFLARED_EXE}", "tunnel", "--url", "http://127.0.0.1:5000"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-            threading.Thread(target=self.read_cf_output, daemon=True).start()
-
-        self.start_btn.config(text="⏹ DỪNG TRẠM TRUNG TÂM", bg="#dc3545")
-
-    def stop_server(self):
-        if self.process_frp: self.process_frp.terminate(); self.process_frp = None
-        if self.process_cf: self.process_cf.terminate(); self.process_cf = None
-        if self.flask_thread: self.flask_thread.shutdown(); self.flask_thread = None
-            
-        self.cf_url_entry.delete(0, tk.END); self.cf_url_entry.insert(0, "Đã tắt máy chủ...")
-        self.start_btn.config(text="▶ KHỞI ĐỘNG TRẠM TRUNG TÂM (TỰ ĐỘNG KẾT NỐI)", bg="#198754")
-        self.log("🛑 Trạm trung tâm điều phối đã dừng hoạt động.")
-
-    # =========================================================================
-    # HÀM TỰ ĐỘNG ĐẨY LINK CLOUDFLARE LÊN TRẠM GÁC (JSONBIN) KHI PHÁT HIỆN LINK MỚI
-    # =========================================================================
-    def read_cf_output(self):
-        if not self.process_cf: return
-        url_pattern = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
-        for line in iter(self.process_cf.stdout.readline, ''):
-            match = url_pattern.search(line)
-            if match:
-                cf_url = match.group(0)
-                self.log(f"🔗 Cloudflare Tunnel: {cf_url}")
+                <div class="hidden md:flex flex-col text-right">
+                    <span class="text-gray-400 text-xs font-semibold uppercase tracking-wider">Số dư khả dụng</span>
+                    <div class="flex items-center justify-end gap-2">
+                        <i class="fa-solid fa-coins text-yellow-400"></i>
+                        <span id="displayCredits" class="text-white font-bold text-lg">0</span>
+                    </div>
+                </div>
                 
-                # Tự động PUSH URL lên Trạm gác
-                if JSONBIN_BIN_ID and JSONBIN_API_KEY and "ĐIỀN" not in JSONBIN_BIN_ID:
-                    try:
-                        self.log("🔄 Đang đồng bộ cấu hình với Website qua Trạm Gác...")
-                        url = f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}"
-                        headers = {
-                            "Content-Type": "application/json",
-                            "X-Master-Key": JSONBIN_API_KEY
-                        }
-                        data = {"latest_api_url": cf_url}
-                        req = requests.put(url, json=data, headers=headers)
+                <button onclick="togglePricing(true)" class="bg-white/10 hover:bg-white/20 border border-white/10 text-white px-5 py-2.5 rounded-full font-semibold text-sm transition-all flex items-center gap-2">
+                    <i class="fa-solid fa-plus"></i> Nạp thêm
+                </button>
+                
+                <div class="h-8 w-px bg-gray-800"></div>
+                
+                <div class="flex items-center gap-3">
+                    <div class="w-9 h-9 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 border border-gray-700">
+                        <i class="fa-solid fa-user"></i>
+                    </div>
+                    <span class="text-gray-200 font-medium hidden sm:block" id="displayUsername">Khách</span>
+                    <button onclick="logout()" class="text-gray-500 hover:text-red-400 ml-2 transition" title="Đăng xuất">
+                        <i class="fa-solid fa-arrow-right-from-bracket"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- TRANG GIỚI THIỆU (LANDING PAGE) -->
+    <div id="landingPage" class="flex-1 w-full">
+        <!-- Hero Section -->
+        <section class="relative pt-20 pb-32 overflow-hidden">
+            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-indigo-600/20 rounded-full blur-[120px] pointer-events-none"></div>
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 text-center">
+                <div class="inline-block mb-4 px-4 py-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 text-indigo-300 text-sm font-semibold tracking-wide backdrop-blur-sm">
+                    <i class="fa-solid fa-sparkles mr-2"></i> Công nghệ AI Tiên tiến 2024
+                </div>
+                <h1 class="text-5xl md:text-7xl font-black text-white mb-6 tracking-tight leading-tight">
+                    Biến Văn Bản Thành <br>
+                    <span class="text-gradient">Giọng Nói Cảm Xúc</span>
+                </h1>
+                <p class="text-lg md:text-xl text-gray-400 mb-10 max-w-2xl mx-auto leading-relaxed">
+                    Xenari Voice cung cấp giải pháp nhân bản giọng nói và chuyển đổi văn bản thành âm thanh chân thực với chất lượng phòng thu, hỗ trợ mạnh mẽ cho Video, Podcast và Audiobook.
+                </p>
+                <div class="flex flex-col sm:flex-row justify-center items-center gap-4">
+                    <button onclick="openStudio()" class="w-full sm:w-auto glow-button text-white px-8 py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-3">
+                        <i class="fa-solid fa-microphone-lines"></i> Trải Nghiệm Miễn Phí
+                    </button>
+                    <a href="#features" class="w-full sm:w-auto bg-gray-800 hover:bg-gray-700 border border-gray-700 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all text-center">
+                        Tìm hiểu thêm
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features Section -->
+        <section id="features" class="py-20 bg-gray-950/50 border-t border-gray-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="text-center mb-16">
+                    <h2 class="text-3xl font-bold text-white mb-4">Tại sao chọn Xenari Voice?</h2>
+                    <p class="text-gray-400">Giải pháp hoàn hảo cho các nhà sáng tạo nội dung số.</p>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                    <div class="pro-card p-8 text-center hover:-translate-y-2">
+                        <div class="w-16 h-16 mx-auto rounded-2xl bg-indigo-500/10 flex items-center justify-center mb-6">
+                            <i class="fa-solid fa-fingerprint text-3xl text-indigo-400"></i>
+                        </div>
+                        <h3 class="text-xl font-bold text-white mb-3">Nhân Bản Giọng Độc Quyền</h3>
+                        <p class="text-gray-400 text-sm leading-relaxed">Chỉ với đoạn ghi âm 15 giây, AI của chúng tôi sẽ học và tạo ra bản sao giọng nói chính xác với ngữ điệu tự nhiên nhất.</p>
+                    </div>
+                    <div class="pro-card p-8 text-center hover:-translate-y-2 border-indigo-500/30">
+                        <div class="w-16 h-16 mx-auto rounded-2xl bg-emerald-500/10 flex items-center justify-center mb-6">
+                            <i class="fa-solid fa-bolt text-3xl text-emerald-400"></i>
+                        </div>
+                        <h3 class="text-xl font-bold text-white mb-3">Tốc Độ Xử Lý Vượt Trội</h3>
+                        <p class="text-gray-400 text-sm leading-relaxed">Mạng lưới GPU phân tán giúp xuất file âm thanh nhanh gấp 5 lần so với thời gian thực. Hỗ trợ hàng vạn ký tự cùng lúc.</p>
+                    </div>
+                    <div class="pro-card p-8 text-center hover:-translate-y-2">
+                        <div class="w-16 h-16 mx-auto rounded-2xl bg-purple-500/10 flex items-center justify-center mb-6">
+                            <i class="fa-solid fa-shield-halved text-3xl text-purple-400"></i>
+                        </div>
+                        <h3 class="text-xl font-bold text-white mb-3">An Toàn & Chuyên Nghiệp</h3>
+                        <p class="text-gray-400 text-sm leading-relaxed">Dữ liệu được mã hóa hai chiều. Tuân thủ nghiêm ngặt quy định bảo vệ dữ liệu và không lưu trữ trái phép bản thu của bạn.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Pricing Section -->
+        <section id="pricing" class="py-24">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="text-center mb-16">
+                    <h2 class="text-3xl font-bold text-white mb-4">Bảng Giá Dịch Vụ</h2>
+                    <p class="text-gray-400 max-w-2xl mx-auto">Thanh toán minh bạch, không tự động gia hạn. Phù hợp cho từ cá nhân đến doanh nghiệp lớn.</p>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
+                    <!-- Gói Cơ Bản -->
+                    <div class="pro-card p-8 bg-gray-900/50">
+                        <h3 class="text-xl font-semibold text-gray-300 mb-2">Gói Cơ Bản</h3>
+                        <div class="flex items-baseline gap-2 mb-4">
+                            <span class="text-4xl font-bold text-white">Miễn Phí</span>
+                        </div>
+                        <p class="text-gray-500 text-sm mb-6 border-b border-gray-800 pb-6">Dành cho trải nghiệm và cá nhân sử dụng ít.</p>
+                        <ul class="space-y-4 mb-8">
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Tặng 5.000 ký tự ban đầu</li>
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Tốc độ render tiêu chuẩn</li>
+                            <li class="flex items-center text-sm text-gray-500"><i class="fa-solid fa-xmark mr-3"></i> Không hỗ trợ lưu trữ Cloud</li>
+                        </ul>
+                        <button onclick="openStudio()" class="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-xl font-semibold transition">Đăng Ký Ngay</button>
+                    </div>
+
+                    <!-- Gói Tiêu Chuẩn -->
+                    <div class="pro-card p-8 border-indigo-500 bg-indigo-900/10 transform md:-translate-y-4 shadow-[0_0_30px_rgba(99,102,241,0.15)] relative">
+                        <div class="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-indigo-500 text-white px-4 py-1 rounded-full text-xs font-bold tracking-wider">PHỔ BIẾN NHẤT</div>
+                        <h3 class="text-xl font-semibold text-indigo-300 mb-2">Gói Tiêu Chuẩn</h3>
+                        <div class="flex items-baseline gap-2 mb-4">
+                            <span class="text-4xl font-bold text-white">300.000</span>
+                            <span class="text-gray-400">VNĐ</span>
+                        </div>
+                        <p class="text-indigo-400/80 text-sm mb-6 border-b border-gray-800 pb-6">Dành cho Youtuber, Tiktoker sáng tạo nội dung đều đặn.</p>
+                        <ul class="space-y-4 mb-8">
+                            <li class="flex items-center text-sm text-gray-200"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> <b>1.000.000 ký tự</b></li>
+                            <li class="flex items-center text-sm text-gray-200"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Ưu tiên hàng đợi máy chủ</li>
+                            <li class="flex items-center text-sm text-gray-200"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Chất lượng WAV Studio</li>
+                            <li class="flex items-center text-sm text-gray-200"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Nhân bản giọng vô giới hạn</li>
+                        </ul>
+                        <button onclick="openStudio()" class="w-full py-3 glow-button text-white rounded-xl font-bold transition">Mua Gói Này</button>
+                    </div>
+
+                    <!-- Gói Pro -->
+                    <div class="pro-card p-8 bg-gray-900/50">
+                        <h3 class="text-xl font-semibold text-gray-300 mb-2">Gói Chuyên Nghiệp</h3>
+                        <div class="flex items-baseline gap-2 mb-4">
+                            <span class="text-4xl font-bold text-white">800.000</span>
+                            <span class="text-gray-400">VNĐ</span>
+                        </div>
+                        <p class="text-gray-500 text-sm mb-6 border-b border-gray-800 pb-6">Dành cho Studio, Agency làm Sách nói, Phim ảnh.</p>
+                        <ul class="space-y-4 mb-8">
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> <b>3.000.000 ký tự</b> (Tiết kiệm 10%)</li>
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Render siêu tốc với Cluster GPU</li>
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Tinh chỉnh cảm xúc nâng cao</li>
+                            <li class="flex items-center text-sm text-gray-300"><i class="fa-solid fa-check text-emerald-500 mr-3"></i> Hỗ trợ kỹ thuật 24/7</li>
+                        </ul>
+                        <button onclick="openStudio()" class="w-full py-3 bg-gray-800 hover:bg-gray-700 text-white rounded-xl font-semibold transition">Mua Gói Này</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Payment Gateways Section (MỚI THÊM) -->
+        <section class="py-16 bg-gray-900/30 border-t border-b border-gray-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+                <h3 class="text-sm font-bold text-gray-400 uppercase tracking-widest mb-8">Hỗ Trợ Đầy Đủ Cổng Thanh Toán Nội Địa</h3>
+                <div class="flex flex-wrap justify-center items-center gap-6 md:gap-10 opacity-70 grayscale hover:grayscale-0 transition-all duration-500">
+                    <!-- Momo -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-pink-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-[#A50064] flex items-center justify-center text-white font-bold text-xs shadow-lg shadow-pink-500/20">MoMo</div>
+                        <span class="text-gray-300 font-semibold text-sm">Ví MoMo</span>
+                    </div>
+                    <!-- VNPay -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-blue-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-blue-600 flex items-center justify-center text-white font-bold text-xs italic shadow-lg shadow-blue-600/20">VN</div>
+                        <span class="text-gray-300 font-semibold text-sm">VNPay QR</span>
+                    </div>
+                    <!-- ZaloPay -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-blue-400/50 transition">
+                        <div class="w-10 h-10 rounded bg-blue-500 flex items-center justify-center text-white font-bold text-xs shadow-lg shadow-blue-500/20">Zalo</div>
+                        <span class="text-gray-300 font-semibold text-sm">ZaloPay</span>
+                    </div>
+                    <!-- VietQR / Napas -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-green-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-green-600 flex items-center justify-center text-white font-bold text-[10px] shadow-lg shadow-green-600/20">VietQR</div>
+                        <span class="text-gray-300 font-semibold text-sm">Chuyển Khoản 24/7</span>
+                    </div>
+                    <!-- Thẻ nội địa -->
+                    <div class="flex items-center gap-3 bg-gray-800 px-5 py-3 rounded-xl border border-gray-700 hover:border-gray-500/50 transition">
+                        <div class="w-10 h-10 rounded bg-gray-700 flex items-center justify-center text-white"><i class="fa-solid fa-credit-card"></i></div>
+                        <span class="text-gray-300 font-semibold text-sm">Thẻ ATM Nội Địa</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Compliance & Policy Footer (Chuẩn BCT) -->
+        <footer class="bg-gray-950 border-t border-gray-900 py-12">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div>
+                        <div class="flex items-center gap-3 mb-6">
+                            <i class="fa-solid fa-wave-square text-indigo-500 text-2xl"></i>
+                            <span class="text-xl font-bold text-white">Xenari<span class="text-indigo-400">Voice</span></span>
+                        </div>
+                        <p class="text-gray-500 text-sm mb-4 leading-relaxed">
+                            Nền tảng trí tuệ nhân tạo thế hệ mới ứng dụng xử lý ngôn ngữ tự nhiên và âm thanh. Sản phẩm được phát triển nhằm mục đích phục vụ cộng đồng sáng tạo nội dung số tại Việt Nam.
+                        </p>
+                        <p class="text-xs text-gray-600 font-semibold mt-6">© 2024 Xenari Tech. Giữ toàn quyền.</p>
+                    </div>
+                    <div class="space-y-6">
+                        <div class="p-5 rounded-xl border border-red-900/30 bg-red-900/10">
+                            <h4 class="text-red-400 font-bold text-sm mb-2 uppercase flex items-center gap-2">
+                                <i class="fa-solid fa-triangle-exclamation"></i> Quy định & Pháp luật
+                            </h4>
+                            <p class="text-gray-400 text-xs leading-relaxed text-justify">
+                                <strong>Nghiêm cấm:</strong> Người dùng KHÔNG được sử dụng nền tảng Xenari Voice để nhân bản giọng nói của các cá nhân, tổ chức, lãnh đạo Nhà nước nhằm mục đích lừa đảo (Deepfake scam), xuyên tạc, bôi nhọ, tống tiền hoặc bất kỳ hành vi nào vi phạm Pháp luật nước Cộng hòa Xã hội Chủ nghĩa Việt Nam. Chúng tôi lưu giữ log IP và sẽ cung cấp cho cơ quan chức năng (Bộ Công An, Bộ TT&TT) khi có yêu cầu điều tra. Việc tiếp tục sử dụng đồng nghĩa bạn đồng ý với Điều khoản Dịch vụ của chúng tôi.
+                            </p>
+                        </div>
+                        <div class="flex gap-4 text-sm">
+                            <a href="#" class="text-indigo-400 hover:text-indigo-300">Chính sách Bảo mật</a>
+                            <a href="#" class="text-indigo-400 hover:text-indigo-300">Điều khoản Sử dụng</a>
+                            <a href="#" class="text-indigo-400 hover:text-indigo-300">Liên hệ Hỗ trợ</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- KHU VỰC ỨNG DỤNG (APP WORKSPACE) - Ẩn mặc định -->
+    <main id="appWorkspace" class="hidden flex-1 w-full max-w-[1920px] mx-auto px-4 sm:px-6 lg:px-8 xl:px-12 py-8">
+        <div class="mb-6 flex justify-between items-center bg-indigo-900/20 border border-indigo-500/30 p-4 rounded-xl">
+            <p class="text-indigo-200 text-sm font-medium"><i class="fa-solid fa-circle-info mr-2"></i> Chào mừng bạn đến với không gian làm việc. Hãy tải lên kịch bản và bắt đầu!</p>
+            <button onclick="goToLanding()" class="text-sm text-gray-400 hover:text-white transition underline"><i class="fa-solid fa-house mr-1"></i> Về Trang chủ</button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 xl:gap-10 items-start">
+            <!-- CỘT TRÁI: Nhập liệu & Chọn Giọng -->
+            <div class="lg:col-span-7 xl:col-span-8 space-y-6">
+                <!-- Khu vực Văn bản -->
+                <div class="pro-card p-6 md:p-8">
+                    <div class="flex justify-between items-end mb-4">
+                        <div>
+                            <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                                <i class="fa-solid fa-keyboard text-indigo-400"></i> Kịch bản văn bản
+                            </h2>
+                            <p class="text-sm text-gray-400 mt-1">Nhập nội dung hoặc tải lên file phụ đề (.srt, .txt)</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="file" id="srtFileInput" accept=".txt,.srt" class="hidden">
+                            <button onclick="document.getElementById('srtFileInput').click()" class="bg-gray-800 hover:bg-gray-700 text-gray-200 py-2 px-4 rounded-lg text-sm font-medium transition border border-gray-700 flex items-center gap-2">
+                                <i class="fa-solid fa-file-import text-gray-400"></i> Tải File
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="relative">
+                        <textarea id="textInput" class="w-full h-64 bg-gray-900/50 text-gray-100 border border-gray-700 rounded-xl p-5 custom-scrollbar focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all leading-relaxed text-base resize-none" placeholder="Bắt đầu nhập nội dung thuyết minh của bạn tại đây..."></textarea>
+                        <div class="absolute bottom-4 right-4 text-xs font-semibold bg-gray-800 text-gray-300 px-3 py-1.5 rounded-full border border-gray-700 shadow-sm">
+                            <span id="charCount">0</span> ký tự
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Khu vực Giọng mẫu -->
+                <div class="pro-card p-6 md:p-8">
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                            <h2 class="text-xl font-bold text-white flex items-center gap-2">
+                                <i class="fa-solid fa-user-astronaut text-indigo-400"></i> Nhân bản Giọng nói
+                            </h2>
+                            <p class="text-sm text-gray-400 mt-1">Chọn mẫu có sẵn hoặc tự tải lên giọng của bạn.</p>
+                        </div>
                         
-                        if req.status_code == 200:
-                            self.cf_url_entry.delete(0, tk.END)
-                            self.cf_url_entry.insert(0, "✅ Website đã được kết nối tự động!")
-                            self.log("✅ ĐỒNG BỘ THÀNH CÔNG! Người dùng có thể vào Web ngay.")
-                        else:
-                            self.log(f"⚠️ Trạm gác từ chối kết nối: {req.text}")
-                    except Exception as e:
-                        self.log(f"⚠️ Lỗi kết nối Trạm gác: {e}")
-                else:
-                    self.cf_url_entry.delete(0, tk.END)
-                    self.cf_url_entry.insert(0, "⚠️ Chưa điền BIN_ID trong code Python")
+                        <div>
+                            <input type="file" id="audioFileInput" accept=".wav,.mp3,.ogg,.m4a" class="hidden">
+                            <button onclick="document.getElementById('audioFileInput').click()" class="bg-indigo-600/10 hover:bg-indigo-600/20 text-indigo-400 py-2 px-4 rounded-lg text-sm font-semibold transition border border-indigo-500/30 flex items-center gap-2">
+                                <i class="fa-solid fa-cloud-arrow-up"></i> Tải giọng gốc
+                            </button>
+                        </div>
+                    </div>
 
-    def update_users_list(self):
-        for i in self.tree_users.get_children(): self.tree_users.delete(i)
-        with users_lock:
-            for username, data in users_data.items(): self.tree_users.insert("", "end", values=(username, data.get('password', ''), f"{data.get('credits', 0):,}"))
+                    <div id="customVoiceStatus" class="hidden mb-6 p-4 rounded-xl bg-indigo-900/20 border border-indigo-500/30 flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400"><i class="fa-solid fa-microphone"></i></div>
+                            <div>
+                                <p class="text-sm font-bold text-white">Giọng mẫu tùy chỉnh</p>
+                                <p id="customVoiceName" class="text-xs text-indigo-300">filename.mp3</p>
+                            </div>
+                        </div>
+                        <span class="text-xs font-bold bg-indigo-500 text-white px-2 py-1 rounded">Đang chọn</span>
+                    </div>
 
-    def on_user_select(self, event):
-        selected = self.tree_users.selection()
-        if not selected: return
-        item = self.tree_users.item(selected[0])['values']
-        self.entry_username.delete(0, tk.END); self.entry_username.insert(0, item[0])
-        self.entry_password.delete(0, tk.END); self.entry_password.insert(0, item[1])
+                    <div id="presetVoicesContainer" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div class="col-span-2 text-center py-8 text-gray-500 text-sm">
+                            <i class="fa-solid fa-spinner fa-spin text-2xl mb-2"></i><br>Đang tải thư viện giọng...
+                        </div>
+                    </div>
+                </div>
+            </div>
 
-    def ui_add_user(self):
-        u = self.entry_username.get().strip()
-        p = self.entry_password.get().strip()
-        try: cre = int(self.entry_credits_amount.get().strip())
-        except ValueError: return
-        if not u or not p: return
+            <!-- CỘT PHẢI: Cài đặt & Xử lý -->
+            <div class="lg:col-span-5 xl:col-span-4 space-y-6">
+                
+                <div class="pro-card p-6">
+                    <h2 class="text-lg font-bold text-white mb-5 flex items-center gap-2">
+                        <i class="fa-solid fa-sliders text-gray-400"></i> Cân chỉnh âm thanh
+                    </h2>
+                    <div class="space-y-5">
+                        <div>
+                            <div class="flex justify-between mb-2">
+                                <label class="text-sm font-medium text-gray-300">Âm lượng</label>
+                                <span id="volVal" class="text-sm font-bold text-indigo-400">1.00x</span>
+                            </div>
+                            <input type="range" id="volSlider" min="0.5" max="3.0" step="0.01" value="1.0" class="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer" oninput="document.getElementById('volVal').innerText = parseFloat(this.value).toFixed(2) + 'x'">
+                        </div>
+                        <div>
+                            <div class="flex justify-between mb-2">
+                                <label class="text-sm font-medium text-gray-300">Tốc độ đọc</label>
+                                <span id="speedVal" class="text-sm font-bold text-indigo-400">1.00x</span>
+                            </div>
+                            <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.01" value="1.0" class="w-full h-2 bg-gray-800 rounded-lg appearance-none cursor-pointer" oninput="document.getElementById('speedVal').innerText = parseFloat(this.value).toFixed(2) + 'x'">
+                        </div>
+                    </div>
+                </div>
 
-        with users_lock:
-            users_data[u] = {"password": p, "credits": cre}
-            save_users_data()
-        self.update_users_list()
+                <button id="btnRun" onclick="startProcessing()" class="w-full glow-button text-white font-bold py-5 rounded-2xl text-xl transition flex justify-center items-center gap-3">
+                    <i class="fa-solid fa-bolt"></i> BẮT ĐẦU TẠO AUDIO
+                </button>
 
-    def ui_adjust_credits(self, is_add=True):
-        u = self.entry_username.get().strip()
-        try: amount = int(self.entry_credits_amount.get().strip())
-        except ValueError: return
-        with users_lock:
-            if u not in users_data: return
-            if is_add: users_data[u]['credits'] += amount
-            else: users_data[u]['credits'] = max(0, users_data[u]['credits'] - amount)
-            save_users_data()
-        self.update_users_list()
+                <!-- KHU VỰC TRÌNH PHÁT -->
+                <div class="pro-card p-6 relative overflow-hidden group">
+                    <div class="absolute -right-10 -top-10 w-40 h-40 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+                    
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-lg font-bold text-white flex items-center gap-2">
+                            <span class="status-dot hidden" id="liveStatusDot"></span>
+                            <i class="fa-solid fa-radio text-emerald-400"></i> Trình Phát
+                        </h2>
+                        
+                        <label class="flex items-center cursor-pointer gap-2 bg-gray-800/80 px-3 py-1.5 rounded-full border border-gray-700 hover:border-gray-600 transition">
+                            <span class="text-xs font-semibold text-gray-300">Tự động phát</span>
+                            <div class="relative">
+                                <input type="checkbox" id="autoPlayToggle" checked class="sr-only">
+                                <div class="block bg-gray-700 w-8 h-4 rounded-full transition toggle-bg"></div>
+                                <div class="dot absolute left-1 top-1 bg-white w-2 h-2 rounded-full transition transform translate-x-4 bg-emerald-400"></div>
+                            </div>
+                        </label>
+                        <style>
+                            input:checked ~ .toggle-bg { background-color: rgba(16, 185, 129, 0.2); border: 1px solid rgba(16, 185, 129, 0.5); }
+                            input:checked ~ .dot { transform: translateX(100%); background-color: #10b981; box-shadow: 0 0 5px #10b981; }
+                            input:not(:checked) ~ .toggle-bg { background-color: #374151; }
+                            input:not(:checked) ~ .dot { transform: translateX(0); background-color: #9ca3af; }
+                        </style>
+                    </div>
 
-    def update_presets_list(self):
-        for i in self.tree_presets.get_children(): self.tree_presets.delete(i)
-        with presets_lock:
-            for item in preset_voices: self.tree_presets.insert("", "end", values=(item.get("id"), item.get("name"), item.get("filename"), item.get("description", "")))
+                    <div class="mb-6">
+                        <div class="flex justify-between text-sm mb-2">
+                            <span id="lblStatus" class="text-gray-400 font-medium">Hệ thống sẵn sàng...</span>
+                            <span id="progressText" class="text-indigo-400 font-bold">0%</span>
+                        </div>
+                        <div class="loader-line bg-gray-800">
+                            <div id="progressBar" class="loader-line-inner bg-gradient-to-r from-indigo-500 to-purple-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]"></div>
+                        </div>
+                        <p id="lblDetail" class="text-xs text-gray-500 mt-2 h-4 truncate">Vui lòng nhập văn bản và tạo giọng nói.</p>
+                    </div>
 
-    def ui_browse_preset(self):
-        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3 *.wav")])
-        if file_path:
-            self.selected_preset_filepath = file_path
-            self.lbl_selected_file.config(text=os.path.basename(file_path), fg="green")
+                    <div class="bg-gray-900/80 border border-gray-800 rounded-xl p-6 flex flex-col items-center justify-center min-h-[160px] transition-all shadow-inner" id="playerDisplay">
+                        <div class="visualizer mb-5" id="audioVisualizer">
+                            <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                        </div>
+                        <div class="text-center w-full">
+                            <p id="playStatusText" class="text-gray-400 text-sm font-medium mb-4">Chưa có luồng âm thanh</p>
+                            
+                            <audio id="liveAudioPlayer" class="hidden"></audio>
+                            
+                            <!-- GIAO DIỆN NÚT CHỮ MỚI CHO TRÌNH PHÁT -->
+                            <div id="customPlayerUI" class="w-full flex flex-col gap-4 hidden opacity-0 transition-opacity duration-500 relative z-20">
+                                <div class="flex items-center gap-3 w-full">
+                                    <span id="currentTimeDisplay" class="text-xs text-gray-400 font-mono w-10 text-right">0:00</span>
+                                    <input type="range" id="customScrubber" min="0" max="100" value="0" step="0.1" class="flex-1 h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer pointer-events-auto">
+                                    <span id="durationDisplay" class="text-xs text-gray-400 font-mono w-10 text-left">0:00</span>
+                                </div>
+                                
+                                <div class="flex flex-wrap items-center justify-center gap-3 mt-1">
+                                    <button id="btnPlayPause" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-bold text-sm flex items-center justify-center transition shadow-lg shadow-indigo-500/40" title="Phát / Tạm dừng">
+                                        <i id="playPauseIcon" class="fa-solid fa-play mr-2"></i>
+                                        <span id="playPauseText">Phát Audio</span>
+                                    </button>
+                                    <button id="btnStop" class="px-5 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-red-400 border border-gray-700 font-bold text-sm flex items-center justify-center transition shadow-md" title="Dừng phát">
+                                        <i class="fa-solid fa-stop mr-2"></i> Dừng Lại
+                                    </button>
+                                    <button onclick="downloadAudioFile()" class="px-5 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-emerald-400 border border-gray-700 font-bold text-sm flex items-center justify-center transition shadow-md" title="Tải xuống nhanh">
+                                        <i class="fa-solid fa-download mr-2"></i> Tải Về
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                </div>
+            </div>
+        </div>
+    </main>
 
-    def ui_add_preset(self):
-        name = self.entry_preset_name.get().strip()
-        desc = self.entry_preset_desc.get().strip()
-        if not name or not self.selected_preset_filepath: return
-        try:
-            filename = os.path.basename(self.selected_preset_filepath)
-            dest_path = os.path.join(PRESET_AUDIO_DIR, filename)
-            import shutil
-            shutil.copy(self.selected_preset_filepath, dest_path)
-            with presets_lock:
-                preset_voices.append({"id": f"v_{int(time.time())}", "name": name, "filename": filename, "description": desc})
-                save_presets_data()
-            self.update_presets_list()
-        except: pass
+    <!-- Cửa sổ đăng nhập -->
+    <div id="loginModal" class="modal-bg fixed inset-0 z-[100] hidden items-center justify-center transition-all duration-300 pointer-events-auto">
+        <div class="pro-card p-8 w-full max-w-md shadow-2xl mx-4 relative">
+            <!-- Nút đóng -->
+            <button onclick="closeLoginModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white transition">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
 
-    def ui_delete_preset(self):
-        selected = self.tree_presets.selection()
-        if not selected:
-            messagebox.showwarning("Cảnh báo", "Vui lòng chọn 1 giọng mẫu trong danh sách để xóa!")
-            return
+            <h2 class="text-2xl font-black text-center mb-6 text-white tracking-wide mt-2">Xenari<span class="text-indigo-400">Voice</span></h2>
             
-        item_values = self.tree_presets.item(selected[0])['values']
-        preset_id = item_values[0]
-        preset_name = item_values[1]
-        filename = item_values[2]
+            <div class="flex border-b border-gray-800 mb-6">
+                <button id="tabLogin" onclick="switchAuthTab('login')" class="flex-1 py-3 text-center text-sm font-bold text-indigo-400 border-b-2 border-indigo-400 focus:outline-none transition uppercase tracking-wider">Đăng Nhập</button>
+                <button id="tabRegister" onclick="switchAuthTab('register')" class="flex-1 py-3 text-center text-sm font-bold text-gray-500 hover:text-gray-300 focus:outline-none transition uppercase tracking-wider">Đăng Ký</button>
+            </div>
+
+            <div class="space-y-4">
+                <div id="registerExtraFields" class="hidden space-y-4">
+                    <input type="text" id="regName" class="w-full bg-gray-900/50 text-white border border-gray-700 rounded-xl p-3 focus:border-indigo-500 transition focus:ring-1 focus:ring-indigo-500" placeholder="Họ và tên">
+                    <input type="tel" id="regPhone" class="w-full bg-gray-900/50 text-white border border-gray-700 rounded-xl p-3 focus:border-indigo-500 transition focus:ring-1 focus:ring-indigo-500" placeholder="Số điện thoại">
+                </div>
+
+                <div class="relative">
+                    <span class="absolute inset-y-0 left-0 flex items-center pl-4 text-gray-500"><i class="fa-solid fa-user"></i></span>
+                    <input type="text" id="username" class="w-full bg-gray-900/50 text-white border border-gray-700 rounded-xl p-3 pl-11 focus:outline-none focus:border-indigo-500 transition focus:ring-1 focus:ring-indigo-500" placeholder="Tên tài khoản">
+                </div>
+
+                <div class="relative">
+                    <span class="absolute inset-y-0 left-0 flex items-center pl-4 text-gray-500"><i class="fa-solid fa-lock"></i></span>
+                    <input type="password" id="password" class="w-full bg-gray-900/50 text-white border border-gray-700 rounded-xl p-3 pl-11 focus:outline-none focus:border-indigo-500 transition focus:ring-1 focus:ring-indigo-500" placeholder="Mật khẩu">
+                </div>
+
+                <div id="captchaField" class="hidden flex items-center gap-3">
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl p-3 text-center w-24 font-bold text-lg text-indigo-300 tracking-widest" id="captchaQuestion">5+3</div>
+                    <span class="text-gray-500">=</span>
+                    <input type="number" id="captchaAnswer" class="w-full bg-gray-900/50 text-white border border-gray-700 rounded-xl p-3 focus:border-indigo-500 transition focus:ring-1 focus:ring-indigo-500" placeholder="Kết quả">
+                </div>
+
+                <div class="flex items-center" id="rememberMeContainer">
+                    <input type="checkbox" id="rememberMe" checked class="w-4 h-4 rounded bg-gray-800 border-gray-700 text-indigo-500 focus:ring-indigo-500">
+                    <span class="ml-2 text-sm text-gray-400">Lưu đăng nhập</span>
+                </div>
+
+                <button onclick="handleAuthSubmit()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3.5 rounded-xl transition shadow-lg shadow-indigo-600/30">
+                    <span id="authBtnText">ĐĂNG NHẬP NGAY</span>
+                </button>
+                <p id="loginError" class="text-red-400 text-sm text-center font-semibold hidden"></p>
+                <p class="text-[10px] text-gray-500 text-center mt-2">Bằng việc đăng nhập, bạn đồng ý với Chính sách bảo vệ dữ liệu & Pháp luật.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cửa sổ nạp tiền (Từ App Workspace) -->
+    <div id="pricingModal" class="modal-bg fixed inset-0 z-50 hidden items-center justify-center p-4 pointer-events-auto">
+        <div class="pro-card p-8 w-full max-w-2xl relative">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-2xl font-bold text-white">Nạp Thêm Ký Tự</h2>
+                <button onclick="togglePricing(false)" class="text-gray-400 hover:text-white"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="border border-gray-700 bg-gray-800/50 rounded-xl p-6 text-center hover:border-indigo-500 transition cursor-pointer" onclick="buyCredits('Tiêu Chuẩn', 300000)">
+                    <h3 class="text-gray-400 font-semibold mb-2">GÓI TIÊU CHUẨN</h3>
+                    <div class="text-3xl font-bold text-white mb-2">300K</div>
+                    <p class="text-indigo-400 text-sm font-bold mb-4">1,000,000 Ký tự</p>
+                    <button class="w-full py-2 bg-gray-700 text-white rounded-lg text-sm font-semibold hover:bg-indigo-600 transition">Mua Ngay</button>
+                </div>
+                <div class="border-2 border-indigo-500 bg-indigo-900/10 rounded-xl p-6 text-center shadow-[0_0_20px_rgba(99,102,241,0.15)] cursor-pointer" onclick="buyCredits('Chuyên Nghiệp', 800000)">
+                    <div class="text-xs bg-indigo-500 text-white inline-block px-2 py-0.5 rounded-full mb-2 font-bold">PHỔ BIẾN</div>
+                    <h3 class="text-gray-300 font-semibold mb-2">GÓI PRO</h3>
+                    <div class="text-3xl font-bold text-white mb-2">800K</div>
+                    <p class="text-indigo-400 text-sm font-bold mb-4">3,000,000 Ký tự</p>
+                    <button class="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-500 transition shadow-lg shadow-indigo-600/30">Mua Ngay</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- WIDGET CHAT HỖ TRỢ ĐÃ SỬA LỖI -->
+    <div id="chatWidget" class="fixed bottom-6 right-6 z-50 flex flex-col items-end pointer-events-none">
+        <div id="chatWindow" class="chat-hidden bg-gray-900 border border-gray-800 w-80 sm:w-96 rounded-2xl shadow-2xl mb-4 overflow-hidden flex flex-col h-[500px] max-h-[80vh] pointer-events-auto">
+            <div class="bg-gray-800 px-4 py-3 flex justify-between items-center border-b border-gray-700">
+                <div class="flex items-center gap-2">
+                    <div class="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse"></div>
+                    <span class="text-emerald-400 font-bold text-sm tracking-wide">KÊNH HỖ TRỢ TRỰC TUYẾN</span>
+                </div>
+                <button onclick="toggleChat()" class="text-gray-400 hover:text-white transition"><i class="fa-solid fa-times"></i></button>
+            </div>
+            
+            <div id="chatContent" class="flex-1 p-4 overflow-y-auto custom-scrollbar bg-gray-950 space-y-4">
+                <div class="text-center text-xs text-emerald-400 italic mb-4 border border-emerald-500/10 p-2 rounded bg-emerald-500/5"><i class="fa-brands fa-telegram"></i> Đã kết nối mã hóa trực tiếp tới Chuyên viên qua Telegram</div>
+            </div>
+
+            <div class="bg-gray-900 border-t border-gray-800 p-3 flex gap-2">
+                <input type="text" id="chatInput" class="flex-1 bg-gray-950 text-white border border-gray-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-emerald-500 transition focus:ring-1 focus:ring-emerald-500" placeholder="Nhập tin nhắn hỗ trợ...">
+                <button onclick="sendChatMessage()" class="bg-emerald-500 text-gray-950 hover:bg-emerald-400 font-extrabold px-4 py-2.5 rounded-xl text-sm transition shadow-lg shadow-emerald-500/20"><i class="fa-solid fa-paper-plane"></i></button>
+            </div>
+        </div>
+
+        <button id="chatBubble" onclick="toggleChat()" class="chat-bubble-btn w-16 h-16 bg-gradient-to-tr from-emerald-600 to-teal-400 hover:from-emerald-500 hover:to-teal-300 text-gray-950 rounded-full shadow-[0_0_20px_rgba(16,185,129,0.5)] flex items-center justify-center text-3xl transition-transform hover:scale-110 focus:outline-none relative pointer-events-auto">
+            <span class="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-gray-950 animate-pulse hidden" id="chatBadge">0</span>
+            <i class="fa-solid fa-comments"></i>
+        </button>
+    </div>
+
+    <!-- HTML Audio Elements -->
+    <audio id="audioPlayer" class="hidden" controls></audio>
+    <audio id="samplePlayer" class="hidden" controls></audio>
+
+    <script>
+        // CONFIG 
+        // ----------------------------------------------------------------------
+        // CẢNH BÁO BẢO MẬT KHI CHẠY HTTPS TRÊN ĐỊA CHỈ IP:
+        // Nếu VPS_IP bên dưới vẫn là địa chỉ IP (vd: 161.248.147.91) thì trình duyệt 
+        // sẽ cảnh báo "Kết nối không an toàn" vì chứng chỉ tạo tự động là Self-signed. 
+        // Bạn nên gắn một Domain (tên miền) vào IP này và tạo chứng chỉ SSL thực để hết cảnh báo.
+        // ----------------------------------------------------------------------
+        const VPS_IP = "161.248.147.91";
+        const API_URL = `https://${VPS_IP}:5000`; // ĐÃ NÂNG CẤP LÊN HTTPS
         
-        if not messagebox.askyesno("Xác nhận xóa", f"Bạn có chắc chắn muốn xóa giọng mẫu '{preset_name}' khỏi website?"):
-            return
-            
-        try:
-            with presets_lock:
-                global preset_voices
-                preset_voices = [p for p in preset_voices if p["id"] != preset_id]
-                save_presets_data()
-                
-            full_file_path = os.path.join(PRESET_AUDIO_DIR, filename)
-            if os.path.exists(full_file_path):
-                os.remove(full_file_path)
-                
-            self.update_presets_list()
-            self.log(f"🗑️ Đã xóa giọng mẫu '{preset_name}' khỏi hệ thống.")
-            messagebox.showinfo("Thành công", "Đã xóa giọng mẫu hoàn tất!")
-            
-        except Exception as e:
-            messagebox.showerror("Lỗi", f"Không thể xóa giọng mẫu: {e}")
+        // CONFIG TELEGRAM INTEGRATION
+        // [CẢNH BÁO BẢO MẬT] Đã xóa Token thật để tránh bị GitGuardian quét và khóa tài khoản của bạn trên GitHub.
+        // BẠN PHẢI chuyển phần logic gửi API tới Telegram vào phần máy chủ (Backend Python/Nodejs). Tuyệt đối không để Token trên Frontend.
+        const TELEGRAM_BOT_TOKEN = ""; 
+        const TELEGRAM_CHAT_ID = ""; 
+        let userMessageCount = 0; 
+        
+        // BIẾN LƯU TRỮ VÀ LẮNG NGHE TIN NHẮN TỪ ADMIN
+        let lastUpdateId = 0;
+        let lastMessageTimestamp = Math.floor(Date.now() / 1000); 
 
-    def on_closing(self):
-        self.stop_server()
-        self.master.destroy()
+        // APP STATE
+        let currentUser = null;
+        let currentPass = null;
+        let refAudioFile = null;
+        let isUsingPresetVoice = false;
+        let selectedPresetUrl = "";
+        let finalWavBlob = null;
+        let finalAudioUrl = null;
+        let expectedCaptcha = 0;
+        let currentAuthMode = 'login';
+        
+        let totalChunksGlobal = 0;
+        let isRendering = false;
+        let hasTriggeredVisit = false;
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app_gui = SmartCoordinatorApp(root)
-    root.mainloop()
+        // UI Helpers
+        function showToast(message, type = "success") {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `p-4 rounded-xl text-sm font-semibold shadow-2xl transition-all duration-300 transform translate-y-2 opacity-0 flex items-center gap-2 border pointer-events-auto backdrop-blur-md ${
+                type === 'success' ? 'bg-emerald-900/90 border-emerald-500/50 text-emerald-100' : 'bg-red-900/90 border-red-500/50 text-red-100'
+            }`;
+            toast.innerHTML = type === 'success' ? `<i class="fa-solid fa-circle-check text-emerald-400"></i> <span>${message}</span>` : `<i class="fa-solid fa-circle-exclamation text-red-400"></i> <span>${message}</span>`;
+            container.appendChild(toast);
+            setTimeout(() => { toast.classList.remove('translate-y-2', 'opacity-0'); }, 10);
+            setTimeout(() => { toast.classList.add('opacity-0', 'translate-y-2'); setTimeout(() => { toast.remove(); }, 3000); }, 3000);
+        }
+
+        function updateStatus(mainText, color = "text-white", detailText = "", percent = null) {
+            document.getElementById('lblStatus').innerText = mainText;
+            document.getElementById('lblStatus').className = `font-medium text-sm ${color}`;
+            if (detailText) document.getElementById('lblDetail').innerText = detailText;
+            if (percent !== null) {
+                document.getElementById('progressBar').style.width = `${percent}%`;
+                document.getElementById('progressText').innerText = `${Math.round(percent)}%`;
+            }
+        }
+
+        // --- ĐIỀU HƯỚNG VIEW (LANDING <-> STUDIO) ---
+        function openStudio() {
+            if (currentUser) {
+                document.getElementById('landingPage').classList.add('hidden');
+                document.getElementById('appWorkspace').classList.remove('hidden');
+                document.getElementById('guestNav').classList.add('hidden');
+                document.getElementById('userNav').classList.remove('hidden');
+                document.getElementById('userNav').classList.add('flex');
+                
+                const btnBack = document.getElementById('btnBackToStudio');
+                if (btnBack) {
+                    btnBack.classList.add('hidden');
+                    btnBack.classList.remove('flex');
+                }
+                
+                window.scrollTo(0, 0);
+            } else {
+                document.getElementById('loginModal').classList.remove('hidden');
+                document.getElementById('loginModal').classList.add('flex');
+            }
+        }
+
+        function goToLanding() {
+            document.getElementById('appWorkspace').classList.add('hidden');
+            document.getElementById('landingPage').classList.remove('hidden');
+            
+            if(currentUser) {
+                document.getElementById('guestNav').classList.add('hidden');
+                document.getElementById('userNav').classList.remove('hidden');
+                document.getElementById('userNav').classList.add('flex');
+                
+                const btnBack = document.getElementById('btnBackToStudio');
+                if (btnBack) {
+                    btnBack.classList.remove('hidden');
+                    btnBack.classList.add('flex');
+                }
+            } else {
+                document.getElementById('guestNav').classList.remove('hidden');
+                document.getElementById('userNav').classList.add('hidden');
+                document.getElementById('userNav').classList.remove('flex');
+            }
+            window.scrollTo(0, 0);
+        }
+
+        function closeLoginModal() {
+            document.getElementById('loginModal').classList.add('hidden');
+            document.getElementById('loginModal').classList.remove('flex');
+        }
+
+        // --- AUTH & INIT ---
+        window.onload = async () => {
+            generateCaptcha();
+            const savedUser = localStorage.getItem('omni_user');
+            const savedPass = localStorage.getItem('omni_pass');
+            
+            if(savedUser && savedPass) {
+                document.getElementById('username').value = savedUser;
+                document.getElementById('password').value = savedPass;
+                await handleAuthSubmit(true);
+            }
+            fetchPresetVoices();
+            
+            triggerVisitorNotification();
+            setInterval(fetchAdminReplies, 3000);
+        };
+        
+        async function fetchAdminReplies() {
+            try {
+                if(!TELEGRAM_BOT_TOKEN) return; // Bỏ qua nếu không có Token
+                const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?offset=${lastUpdateId + 1}`;
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                if (data.ok && data.result.length > 0) {
+                    for (const update of data.result) {
+                        lastUpdateId = update.update_id;
+                        if (update.message && update.message.chat.id.toString() === TELEGRAM_CHAT_ID) {
+                            if (update.message.date > lastMessageTimestamp && update.message.text) {
+                                displayAdminMessage(update.message.text);
+                                lastMessageTimestamp = update.message.date;
+                            }
+                        }
+                    }
+                }
+            } catch (e) { console.error("Lỗi khi tải tin nhắn từ Telegram:", e); }
+        }
+
+        function displayAdminMessage(text) {
+            const chatContent = document.getElementById('chatContent');
+            chatContent.innerHTML += `
+                <div class="flex flex-col gap-1 items-start mt-3 animate-fade-in">
+                    <span class="text-[10px] text-gray-400 ml-1">👨‍💻 Chuyên viên</span>
+                    <div class="bg-gray-800 text-white px-3 py-2.5 rounded-2xl rounded-tl-none text-sm max-w-[85%] shadow border border-gray-700">
+                        ${text}
+                    </div>
+                </div>
+            `;
+            chatContent.scrollTop = chatContent.scrollHeight;
+            
+            const win = document.getElementById('chatWindow');
+            if (win.classList.contains('chat-hidden')) {
+                const badge = document.getElementById('chatBadge');
+                let count = parseInt(badge.innerText) || 0;
+                badge.innerText = count + 1;
+                badge.classList.remove('hidden');
+            }
+        }
+
+        async function triggerVisitorNotification() {
+            if (hasTriggeredVisit) return;
+            hasTriggeredVisit = true;
+
+            setTimeout(() => {
+                const chatBadge = document.getElementById('chatBadge');
+                chatBadge.innerText = "1";
+                chatBadge.classList.remove('hidden');
+                
+                const chatContent = document.getElementById('chatContent');
+                chatContent.innerHTML += `
+                    <div class="flex flex-col gap-1 items-start animate-fade-in mt-2">
+                        <span class="text-[10px] text-gray-400 ml-1">🤖 Trợ lý AI</span>
+                        <div class="bg-gray-800 text-emerald-400 px-3 py-2.5 rounded-2xl rounded-tl-none text-sm max-w-[85%] font-semibold shadow border border-emerald-900/50">
+                            Chào bạn! 💬 Hiện tại bạn có gặp khó khăn gì ở bước nào khi sử dụng công nghệ Nhân bản giọng nói hay nạp tín dụng không ạ? Hãy gửi tin nhắn để gặp trực tiếp nhân viên hỗ trợ nhé!
+                        </div>
+                    </div>
+                `;
+                chatContent.scrollTop = chatContent.scrollHeight;
+            }, 2500);
+        }
+
+        async function sendToTelegramAPI(text, user) {
+            if(!TELEGRAM_BOT_TOKEN) return; // Bỏ qua nếu không có Token
+            const message = `🌐 *TIN NHẮN HỖ TRỢ TỪ WEB*\n👤 *Người dùng:* ${user}\n💬 *Nội dung:* ${text}`;
+            const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+            try {
+                await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: "Markdown" })
+                });
+            } catch(e) { console.error("Lỗi gửi Telegram", e); }
+        }
+
+        function toggleChat(forceOpen = false) {
+            const win = document.getElementById('chatWindow');
+            const badge = document.getElementById('chatBadge');
+            badge.classList.add('hidden'); 
+            badge.innerText = "0";
+
+            if(forceOpen || win.classList.contains('chat-hidden')) {
+                win.classList.remove('chat-hidden'); win.classList.add('chat-visible');
+            } else {
+                win.classList.add('chat-hidden'); win.classList.remove('chat-visible');
+            }
+        }
+        
+        async function sendChatMessage() {
+            const input = document.getElementById('chatInput');
+            const text = input.value.trim();
+            if(!text) return;
+            
+            const chatContent = document.getElementById('chatContent');
+            chatContent.innerHTML += `
+                <div class="flex flex-col gap-1 items-end mt-3 animate-fade-in">
+                    <span class="text-[10px] text-emerald-400 mr-1">Bạn</span>
+                    <div class="bg-emerald-500 text-gray-950 font-bold px-3 py-2 rounded-2xl rounded-tr-none text-sm max-w-[85%] shadow">
+                        ${text}
+                    </div>
+                </div>
+            `;
+            input.value = ''; 
+            chatContent.scrollTop = chatContent.scrollHeight;
+            
+            const username = currentUser || "Khách chưa Đăng nhập";
+            sendToTelegramAPI(text, username);
+            
+            userMessageCount++;
+            
+            if (userMessageCount === 1) {
+                setTimeout(() => {
+                    chatContent.innerHTML += `
+                        <div class="flex flex-col gap-1 items-start mt-3 animate-fade-in">
+                            <span class="text-[10px] text-gray-400 ml-1">🤖 Trợ lý AI</span>
+                            <div class="bg-gray-800 text-emerald-400 px-3 py-2.5 rounded-2xl rounded-tl-none text-sm max-w-[85%] font-semibold shadow border border-emerald-900/50">
+                                Cảm ơn bạn đã liên hệ! Yêu cầu của bạn đã được chuyển đến chuyên viên hỗ trợ trực tuyến. Vui lòng đợi trong giây lát hoặc có thể để lại Số Điện Thoại/Zalo để chúng tôi gọi lại ngay nhé! ⏳
+                            </div>
+                        </div>
+                    `;
+                    chatContent.scrollTop = chatContent.scrollHeight;
+                }, 1000);
+            }
+        }
+        
+        document.getElementById('chatInput').addEventListener('keypress', function (e) { if (e.key === 'Enter') sendChatMessage(); });
+
+        async function fetchPresetVoices() {
+            try {
+                const res = await fetch(`${API_URL}/get_preset_voices`);
+                const data = await res.json();
+                const container = document.getElementById('presetVoicesContainer');
+                container.innerHTML = "";
+                if(data && data.voices && data.voices.length > 0) {
+                    data.voices.forEach(v => {
+                        const fileUrl = `${API_URL}/preset-audio/${v.filename}`;
+                        container.innerHTML += `
+                            <div class="voice-card bg-gray-800/60 p-4 rounded-xl cursor-pointer flex justify-between items-center" onclick="selectPresetVoice(this, '${fileUrl}', '${v.name}')">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center"><i class="fa-solid fa-music"></i></div>
+                                    <div>
+                                        <div class="text-sm font-bold text-gray-200">${v.name}</div>
+                                        <div class="text-xs text-gray-500">${v.description || 'Hệ thống'}</div>
+                                    </div>
+                                </div>
+                                <button onclick="playSample(event, '${fileUrl}', this)" class="text-gray-400 hover:text-indigo-400 p-2"><i class="fa-solid fa-circle-play text-xl"></i></button>
+                            </div>
+                        `;
+                    });
+                } else {
+                    container.innerHTML = `<p class="col-span-2 text-gray-500 text-sm">Chưa có giọng mẫu từ server.</p>`;
+                }
+            } catch(e) {
+                document.getElementById('presetVoicesContainer').innerHTML = `<p class="col-span-2 text-red-400 text-sm">Mất kết nối máy chủ giọng mẫu hoặc chưa cấp quyền hiển thị chứng chỉ Self-signed (Hãy mở ${API_URL} trong tab mới và click "Tiếp tục").</p>`;
+            }
+        }
+
+        function switchAuthTab(mode) {
+            currentAuthMode = mode;
+            document.getElementById('tabLogin').className = mode === 'login' ? "flex-1 py-3 text-center text-sm font-bold text-indigo-400 border-b-2 border-indigo-400 transition uppercase tracking-wider" : "flex-1 py-3 text-center text-sm font-bold text-gray-500 hover:text-gray-300 transition uppercase tracking-wider";
+            document.getElementById('tabRegister').className = mode === 'register' ? "flex-1 py-3 text-center text-sm font-bold text-indigo-400 border-b-2 border-indigo-400 transition uppercase tracking-wider" : "flex-1 py-3 text-center text-sm font-bold text-gray-500 hover:text-gray-300 transition uppercase tracking-wider";
+            document.getElementById('registerExtraFields').style.display = mode === 'register' ? 'block' : 'none';
+            document.getElementById('captchaField').style.display = mode === 'register' ? 'flex' : 'none';
+            document.getElementById('rememberMeContainer').style.display = mode === 'login' ? 'flex' : 'none';
+            document.getElementById('authBtnText').innerText = mode === 'login' ? "ĐĂNG NHẬP" : "TẠO TÀI KHOẢN";
+            if(mode === 'register') generateCaptcha();
+        }
+
+        function generateCaptcha() {
+            const n1 = Math.floor(Math.random() * 10) + 1;
+            const n2 = Math.floor(Math.random() * 10) + 1;
+            expectedCaptcha = n1 + n2;
+            document.getElementById('captchaQuestion').innerText = `${n1} + ${n2}`;
+        }
+
+        async function handleAuthSubmit(isAuto = false) {
+            const user = document.getElementById('username').value.trim();
+            const pass = document.getElementById('password').value.trim();
+            const err = document.getElementById('loginError');
+            
+            if(!user || !pass) { err.innerText = "Nhập đủ thông tin!"; err.classList.remove('hidden'); return; }
+            let payload = { username: user, password: pass, mode: currentAuthMode };
+
+            if(currentAuthMode === 'register' && !isAuto) {
+                const name = document.getElementById('regName').value;
+                const phone = document.getElementById('regPhone').value;
+                if(!name || !phone || parseInt(document.getElementById('captchaAnswer').value) !== expectedCaptcha) {
+                    err.innerText = "Sai Captcha hoặc thiếu thông tin!"; err.classList.remove('hidden'); generateCaptcha(); return;
+                }
+                payload.fullname = name; payload.phone = phone;
+            }
+
+            try {
+                const res = await fetch(`${API_URL}/auth`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                const data = await res.json();
+                
+                if (data.status === 'success') {
+                    currentUser = user; currentPass = pass;
+                    document.getElementById('displayUsername').innerText = user;
+                    document.getElementById('displayCredits').innerText = data.credits.toLocaleString();
+                    if(document.getElementById('rememberMe').checked && !isAuto) {
+                        localStorage.setItem('omni_user', user); localStorage.setItem('omni_pass', pass);
+                    }
+                    
+                    closeLoginModal();
+                    
+                    if(!isAuto) {
+                        showToast("Đăng nhập thành công!");
+                        setTimeout(openStudio, 300);
+                    } else {
+                        document.getElementById('guestNav').classList.add('hidden');
+                        document.getElementById('userNav').classList.remove('hidden');
+                        document.getElementById('userNav').classList.add('flex');
+                        
+                        const btnBack = document.getElementById('btnBackToStudio');
+                        if (btnBack) {
+                            btnBack.classList.remove('hidden');
+                            btnBack.classList.add('flex');
+                        }
+                    }
+                } else if(!isAuto) { err.innerText = data.message; err.classList.remove('hidden'); }
+            } catch (e) { if(!isAuto) { err.innerText = "Lỗi máy chủ! Vui lòng kiểm tra lại kết nối HTTPS."; err.classList.remove('hidden'); } }
+        }
+
+        function logout() { localStorage.clear(); location.reload(); }
+        function togglePricing(show) { document.getElementById('pricingModal').style.display = show ? 'flex' : 'none'; }
+        function buyCredits(pkg, price) { showToast(`Chức năng nạp ${pkg} (${price}đ) qua API ngân hàng đang tích hợp.`, "success"); togglePricing(false); }
+
+        // --- INPUT HANDLING ---
+        document.getElementById('textInput').addEventListener('input', function(e) {
+            document.getElementById('charCount').innerText = this.value.length.toLocaleString();
+        });
+
+        document.getElementById('srtFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = e => {
+                document.getElementById('textInput').value = e.target.result;
+                document.getElementById('textInput').dispatchEvent(new Event('input'));
+                showToast("Đã tải tệp văn bản.");
+            };
+            reader.readAsText(file, "UTF-8");
+        });
+
+        function selectPresetVoice(element, url, name) {
+            document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('active'));
+            element.classList.add('active');
+            isUsingPresetVoice = true; selectedPresetUrl = url; refAudioFile = null;
+            document.getElementById('customVoiceStatus').classList.add('hidden');
+            showToast(`Đã chọn giọng: ${name}`);
+        }
+
+        let currentSampleUrl = "";
+        function playSample(e, url, btn) {
+            e.stopPropagation();
+            const player = document.getElementById('samplePlayer');
+            document.querySelectorAll('.fa-circle-pause').forEach(i => { i.className = 'fa-solid fa-circle-play text-xl'; });
+            
+            if(currentSampleUrl === url && !player.paused) {
+                player.pause(); btn.innerHTML = '<i class="fa-solid fa-circle-play text-xl"></i>';
+            } else {
+                player.src = url; player.play(); currentSampleUrl = url;
+                btn.innerHTML = '<i class="fa-solid fa-circle-pause text-xl text-indigo-400"></i>';
+                player.onended = () => { btn.innerHTML = '<i class="fa-solid fa-circle-play text-xl"></i>'; currentSampleUrl = ""; };
+            }
+        }
+
+        document.getElementById('audioFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            refAudioFile = file; isUsingPresetVoice = false;
+            document.querySelectorAll('.voice-card').forEach(c => c.classList.remove('active'));
+            const st = document.getElementById('customVoiceStatus');
+            st.classList.remove('hidden');
+            document.getElementById('customVoiceName').innerText = file.name;
+            showToast("Đã nạp giọng gốc tùy chỉnh.");
+        });
+
+        // --- AUTO-PLAY LIVE LOGIC ---
+        const livePlayerUI = document.getElementById('liveAudioPlayer');
+        const customPlayerContainer = document.getElementById('customPlayerUI');
+        const btnPlayPause = document.getElementById('btnPlayPause');
+        const playPauseIcon = document.getElementById('playPauseIcon');
+        const playPauseText = document.getElementById('playPauseText');
+        const btnStop = document.getElementById('btnStop');
+        const customScrubber = document.getElementById('customScrubber');
+        const currentTimeDisplay = document.getElementById('currentTimeDisplay');
+        const durationDisplay = document.getElementById('durationDisplay');
+        let isUserScrubbing = false;
+
+        function formatTime(seconds) {
+            if (isNaN(seconds) || !isFinite(seconds)) return "0:00";
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m}:${s < 10 ? '0' : ''}${s}`;
+        }
+        
+        function showCustomPlayer() {
+            customPlayerContainer.classList.remove('hidden');
+            setTimeout(() => customPlayerContainer.classList.remove('opacity-0'), 50);
+        }
+
+        // HÀM HỖ TRỢ GIỮ VỊ TRÍ PHÁT NHẠC MƯỢT MÀ KHÔNG LỖI
+        function setAudioSourceAndRestore(player, newUrl, shouldPlay, oldTime) {
+            player.src = newUrl;
+            player.load();
+            
+            const restoreState = () => {
+                if (oldTime > 0 && oldTime < player.duration) {
+                    try { player.currentTime = oldTime; } catch(e) {}
+                }
+                if (shouldPlay) {
+                    let p = player.play();
+                    if (p) p.catch(e => console.warn(e));
+                }
+            };
+
+            if (player.readyState >= 1) {
+                restoreState();
+            } else {
+                player.addEventListener('loadedmetadata', function onMeta() {
+                    restoreState();
+                    player.removeEventListener('loadedmetadata', onMeta);
+                });
+            }
+        }
+
+        btnPlayPause.addEventListener('click', () => {
+            if (!livePlayerUI.src) return;
+            if (livePlayerUI.paused) {
+                let playPromise = livePlayerUI.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        document.getElementById('playStatusText').innerText = "Đang phát âm thanh...";
+                    }).catch(console.warn);
+                }
+            } else {
+                livePlayerUI.pause();
+                document.getElementById('playStatusText').innerText = "Đã tạm dừng";
+            }
+        });
+
+        btnStop.addEventListener('click', () => {
+            if (!livePlayerUI.src) return;
+            
+            livePlayerUI.pause();
+            try { livePlayerUI.currentTime = 0; } catch(e) {}
+            
+            const sampleP = document.getElementById('samplePlayer');
+            if(sampleP) sampleP.pause();
+            const mainP = document.getElementById('audioPlayer');
+            if(mainP) mainP.pause();
+            
+            const autoPlayToggle = document.getElementById('autoPlayToggle');
+            if (autoPlayToggle && autoPlayToggle.checked) {
+                autoPlayToggle.checked = false;
+            }
+            
+            customScrubber.value = 0;
+            updateScrubberUI();
+            currentTimeDisplay.innerText = "0:00";
+            
+            playPauseIcon.className = 'fa-solid fa-play mr-2';
+            playPauseText.innerText = 'Phát Audio';
+            
+            document.getElementById('audioVisualizer').classList.remove('playing');
+            document.getElementById('liveStatusDot').classList.add('hidden');
+            document.getElementById('playStatusText').innerText = "Đã dừng phát";
+        });
+
+        customScrubber.addEventListener('input', () => {
+            isUserScrubbing = true;
+            currentTimeDisplay.innerText = formatTime(customScrubber.value);
+        });
+
+        customScrubber.addEventListener('change', () => {
+            isUserScrubbing = false;
+            if (livePlayerUI.src && livePlayerUI.duration) {
+                try { livePlayerUI.currentTime = customScrubber.value; } catch(e) {}
+            }
+        });
+
+        livePlayerUI.addEventListener('loadedmetadata', () => {
+            customScrubber.max = livePlayerUI.duration;
+            durationDisplay.innerText = formatTime(livePlayerUI.duration);
+        });
+
+        livePlayerUI.addEventListener('timeupdate', () => {
+            if (!isUserScrubbing && livePlayerUI.duration) {
+                customScrubber.max = livePlayerUI.duration;
+                customScrubber.value = livePlayerUI.currentTime;
+                currentTimeDisplay.innerText = formatTime(livePlayerUI.currentTime);
+                durationDisplay.innerText = formatTime(livePlayerUI.duration);
+                updateScrubberUI();
+            }
+        });
+
+        function updateScrubberUI() {
+            const percentage = (customScrubber.value / customScrubber.max) * 100 || 0;
+            customScrubber.style.background = `linear-gradient(to right, #6366f1 ${percentage}%, #374151 ${percentage}%)`;
+        }
+        
+        livePlayerUI.onplay = () => {
+            playPauseIcon.className = 'fa-solid fa-pause mr-2';
+            playPauseText.innerText = 'Tạm Dừng';
+            document.getElementById('audioVisualizer').classList.add('playing');
+            document.getElementById('liveStatusDot').classList.remove('hidden');
+        };
+
+        livePlayerUI.onpause = () => {
+            playPauseIcon.className = 'fa-solid fa-play mr-2';
+            playPauseText.innerText = 'Tiếp Tục';
+            document.getElementById('audioVisualizer').classList.remove('playing');
+            document.getElementById('liveStatusDot').classList.add('hidden');
+        };
+
+        livePlayerUI.onended = () => {
+            playPauseIcon.className = 'fa-solid fa-play mr-2';
+            playPauseText.innerText = 'Phát Lại';
+            document.getElementById('audioVisualizer').classList.remove('playing');
+            document.getElementById('liveStatusDot').classList.add('hidden');
+            if (!isRendering) {
+                document.getElementById('playStatusText').innerText = "Đã phát hoàn tất toàn bộ Audio";
+            }
+        };
+
+        document.getElementById('autoPlayToggle').addEventListener('change', (e) => {
+            if(e.target.checked && livePlayerUI.src) {
+                let p = livePlayerUI.play();
+                if (p) p.catch(console.warn);
+            } else if (!e.target.checked) {
+                livePlayerUI.pause();
+                document.getElementById('playStatusText').innerText = "Đã tắt tự động phát";
+            }
+        });
+
+        // --- CORE PROCESSING LOGIC ---
+        function smartSplitText(text, maxLength = 400) {
+            text = text.trim(); if (!text) return [];
+            const sentences = text.split(/(?<=[.!?;\n])\s*/);
+            let chunks = []; let currentChunk = "";
+            for (let sentence of sentences) {
+                sentence = sentence.trim(); if (!sentence) continue;
+                if (sentence.length > maxLength) {
+                    const subs = sentence.split(/(?<=[,])\s*/);
+                    for (let sub of subs) {
+                        sub = sub.trim(); if (!sub) continue;
+                        if (!currentChunk) currentChunk = sub;
+                        else if (currentChunk.length + sub.length + 1 <= maxLength) currentChunk += " " + sub;
+                        else { chunks.push(currentChunk); currentChunk = sub; }
+                    }
+                } else {
+                    if (!currentChunk) currentChunk = sentence;
+                    else if (currentChunk.length + sentence.length + 1 <= maxLength) currentChunk += " " + sentence;
+                    else { chunks.push(currentChunk); currentChunk = sentence; }
+                }
+            }
+            if (currentChunk) chunks.push(currentChunk);
+            return chunks;
+        }
+
+        async function fetchNodeLinks() {
+            try {
+                const res = await fetch(`${API_URL}/get_links`);
+                if (!res.ok) throw new Error("Status " + res.status);
+                const data = await res.json(); 
+                return data.urls || [];
+            } catch (e) { throw new Error("Mất kết nối Cluster GPU."); }
+        }
+
+        async function callGradioAPI(apiUrl, textChunk, refFile, gradioClientModule) {
+            const cleanUrl = apiUrl.endsWith('/') ? apiUrl.slice(0, -1) : apiUrl;
+            const app = await gradioClientModule.client(cleanUrl);
+            const result = await app.predict("/generate", [textChunk, refFile]);
+            
+            let output = result.data[1];
+            let audioUrl = typeof output === 'string' ? output : output.url;
+            if (!audioUrl) audioUrl = `${cleanUrl}/file=${(output.path || output.name).replace(/^\//, '')}`;
+            if (!audioUrl.startsWith('http')) audioUrl = `${cleanUrl}/${audioUrl.replace(/^\//, '')}`;
+            
+            const res = await fetch(audioUrl);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return await res.arrayBuffer();
+        }
+
+        // HÀM GỘP FILE CHỐNG CRASH KHI CÓ FILE NULL
+        function concatenateWavs(buffers) {
+            const validBuffers = buffers.filter(b => b !== null);
+            if (validBuffers.length === 0) return new Blob([], {type: 'audio/wav'});
+            
+            let len = 0; 
+            validBuffers.forEach(b => len += (b.byteLength - 44));
+            
+            const out = new Uint8Array(44 + len);
+            out.set(new Uint8Array(validBuffers[0].slice(0, 44)), 0);
+            
+            const view = new DataView(out.buffer);
+            view.setUint32(4, 36 + len, true); 
+            view.setUint32(40, len, true);
+            
+            let off = 44;
+            validBuffers.forEach(b => { 
+                const d = new Uint8Array(b, 44); 
+                out.set(d, off); 
+                off += d.length; 
+            });
+            return new Blob([out], { type: 'audio/wav' });
+        }
+
+        const delay = ms => new Promise(res => setTimeout(res, ms));
+
+        async function startProcessing() {
+            const text = document.getElementById('textInput').value;
+            const chars = text.length;
+            
+            if (!text.trim()) return showToast("Vui lòng nhập văn bản!", "error");
+            if (!refAudioFile && !isUsingPresetVoice) return showToast("Chọn giọng mẫu trước!", "error");
+            if (!currentUser) { openStudio(); return; } 
+
+            const btn = document.getElementById('btnRun');
+            btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-fan fa-spin"></i> ĐANG KHỞI TẠO LUỒNG...';
+            
+            livePlayerUI.pause();
+            livePlayerUI.src = "";
+            livePlayerUI.currentTime = 0;
+            customPlayerContainer.classList.add('opacity-0', 'hidden');
+            customScrubber.value = 0;
+            updateScrubberUI();
+            currentTimeDisplay.innerText = "0:00";
+            durationDisplay.innerText = "0:00";
+            
+            isRendering = true;
+            document.getElementById('playStatusText').innerText = "Đang khởi tạo Engine...";
+            document.getElementById('playStatusText').classList.remove('hidden');
+            
+            updateStatus("Xác thực giao dịch...", "text-yellow-400", "", 0);
+
+            try {
+                const chunks = smartSplitText(text);
+                totalChunksGlobal = chunks.length;
+
+                if (totalChunksGlobal === 0) throw new Error("Không có nội dung để xử lý.");
+
+                updateStatus("Tìm kiếm trạm máy chủ rảnh...", "text-yellow-400", "", 5);
+                const nodeLinks = await fetchNodeLinks();
+                if (nodeLinks.length === 0) throw new Error("Chưa có máy trạm Worker Colab nào hoạt động.");
+                const activeNodes = nodeLinks.map(l => l.endsWith('/') ? l.slice(0, -1) : l);
+
+                let targetRefFile = refAudioFile;
+                if(isUsingPresetVoice) {
+                    updateStatus("Tải mẫu giọng đọc gốc...", "text-yellow-400", "", 10);
+                    const presetResponse = await fetch(selectedPresetUrl);
+                    if (!presetResponse.ok) throw new Error("Lỗi tải giọng mẫu từ máy chủ.");
+                    const presetBlob = await presetResponse.blob();
+                    targetRefFile = new File([presetBlob], "preset_voice.mp3", { type: presetBlob.type });
+                }
+
+                let gradioClientModule;
+                try { 
+                    gradioClientModule = await import("https://esm.sh/@gradio/client"); 
+                } catch(e) { 
+                    throw new Error("Trình duyệt không thể nạp được thư viện Gradio Client!"); 
+                }
+
+                let completed = 0;
+                let audioBuffers = new Array(totalChunksGlobal).fill(null);
+                let lastContinuousCount = 0;
+
+                const updateLiveScrubber = () => {
+                    let continuousBuffers = [];
+                    for (let j = 0; j < totalChunksGlobal; j++) {
+                        if (audioBuffers[j]) continuousBuffers.push(audioBuffers[j]);
+                        else break;
+                    }
+
+                    const shouldUpdate = continuousBuffers.length >= 2 || (totalChunksGlobal === 1 && continuousBuffers.length === 1) || (!isRendering && continuousBuffers.length > 0);
+
+                    if (shouldUpdate && continuousBuffers.length > lastContinuousCount) {
+                        const tempBlob = concatenateWavs(continuousBuffers);
+                        const tempUrl = URL.createObjectURL(tempBlob);
+                        
+                        const wasPlaying = !livePlayerUI.paused;
+                        const oldTime = livePlayerUI.currentTime;
+                        const autoPlayEnabled = document.getElementById('autoPlayToggle').checked;
+                        const shouldPlay = wasPlaying || (autoPlayEnabled && lastContinuousCount === 0);
+
+                        setAudioSourceAndRestore(livePlayerUI, tempUrl, shouldPlay, oldTime);
+                        
+                        showCustomPlayer();
+                        lastContinuousCount = continuousBuffers.length;
+                        document.getElementById('playStatusText').innerText = `Đã đệm ${lastContinuousCount}/${totalChunksGlobal} đoạn - Có thể tua ngay để nghe`;
+                    }
+                };
+
+                const processChunk = async (i, txt) => {
+                    await delay(Math.random() * 500);
+                    let success = false;
+                    for (let att = 0; att < activeNodes.length; att++) {
+                        try {
+                            const buf = await callGradioAPI(activeNodes[(i+att)%activeNodes.length], txt, targetRefFile, gradioClientModule);
+                            audioBuffers[i] = buf;
+                            
+                            success = true; completed++;
+                            updateStatus(`Đang xử lý AI...`, "text-emerald-400", `Đoạn ${completed}/${totalChunksGlobal} hoàn tất`, (completed/totalChunksGlobal)*90);
+                            
+                            updateLiveScrubber();
+                            break; 
+                        } catch (e) { console.warn(`Lỗi đoạn ${i+1}:`, e); }
+                    }
+                    if(!success) {
+                        console.error(`Lỗi đoạn ${i+1}`);
+                        completed++;
+                        updateStatus(`Bỏ qua đoạn ${i+1} do lỗi...`, "text-yellow-400", `Đoạn ${completed}/${totalChunksGlobal} hoàn tất`, (completed/totalChunksGlobal)*90);
+                    }
+                };
+
+                const concurrency = Math.min(3, activeNodes.length);
+                let idx = 0; const pool = new Set();
+                while (idx < chunks.length || pool.size > 0) {
+                    while (pool.size < concurrency && idx < chunks.length) {
+                        const p = processChunk(idx, chunks[idx]);
+                        pool.add(p); p.finally(() => pool.delete(p)); idx++;
+                    }
+                    if (pool.size > 0) await Promise.race(pool);
+                }
+
+                updateStatus("Hoàn thiện File Audio", "text-purple-400", "Đang nối file Master...", 95);
+                finalWavBlob = concatenateWavs(audioBuffers); 
+                
+                if (finalAudioUrl) URL.revokeObjectURL(finalAudioUrl);
+                finalAudioUrl = URL.createObjectURL(finalWavBlob);
+                
+                document.getElementById('audioPlayer').src = finalAudioUrl;
+
+                updateStatus("THÀNH CÔNG", "text-emerald-400", "Toàn bộ file đã tạo xong.", 100);
+                showToast("Dựng Audio thành công!");
+
+                isRendering = false;
+                updateLiveScrubber();
+
+            } catch (err) {
+                console.error(err);
+                updateStatus("LỖI XỬ LÝ", "text-red-400", err.message, 0);
+                document.getElementById('playStatusText').innerText = "Dừng do lỗi kết nối";
+            } finally {
+                isRendering = false;
+                btn.disabled = false;
+                btn.innerHTML = `<i class="fa-solid fa-bolt"></i> TẠO AUDIO MỚI`;
+            }
+        }
+
+        // HÀM TẢI XUỐNG AN TOÀN
+        function downloadAudioFile() {
+            let urlToDownload = finalAudioUrl;
+            
+            if (!urlToDownload && livePlayerUI && livePlayerUI.src && livePlayerUI.src.includes('blob:')) {
+                urlToDownload = livePlayerUI.src;
+            }
+
+            if (!urlToDownload || urlToDownload === "" || urlToDownload === window.location.href) {
+                showToast("Chưa có file âm thanh để tải xuống!", "error");
+                return;
+            }
+
+            try {
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = urlToDownload;
+                a.download = `Xenari_Audio_${Date.now()}.wav`;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                setTimeout(() => {
+                    if (document.body.contains(a)) {
+                        document.body.removeChild(a);
+                    }
+                }, 150);
+                
+                showToast("Đang tải file âm thanh xuống máy...", "success");
+            } catch (e) {
+                console.error("Download fallback error:", e);
+                showToast("Trình duyệt chặn, đang mở qua tab mới...", "error");
+                window.open(urlToDownload, '_blank');
+            }
+        }
+    </script>
+</body>
+</html>
