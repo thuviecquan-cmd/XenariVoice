@@ -527,13 +527,16 @@
 
     <script>
         // =========================================================================
-        // KHỐI AUTO-FETCH DYNAMIC LINK TỪ TRẠM GÁC (THAY THẾ VIỆC NGƯỜI DÙNG TỰ NHẬP)
+        // CẤU HÌNH TRẠM GÁC Ở PHÍA WEBSITE (ĐỂ LẤY LINK)
         // =========================================================================
         
-        // Link API JSONBIN giống với Backend Python (Nơi Backend sẽ ghi link Cloudflare lên)
-        const JSONBIN_URL = "https://api.jsonbin.io/v3/b/668a1b1fecd3cb3090623a8e/latest";
-        // Header Key để đọc từ JSONBIN (Bạn phải có X-Access-Key riêng để bảo mật đọc)
-        const JSONBIN_ACCESS_KEY = "$2a$10$YourAccessKeyHere..."; 
+        // NHỚ THAY CHỮ "ĐIỀN_BIN_ID_CỦA_BẠN_VÀO_ĐÂY" BẰNG BIN_ID (Ví dụ: 668a1b1fecd3cb3090623a8e)
+        const JSONBIN_BIN_ID = "6a46d58df5f4af5e29566991"; 
+        
+        // Link API JSONBIN lấy thông tin mới nhất
+        const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}/latest`;
+        // Header Master Key (Đã chèn key bạn cung cấp)
+        const JSONBIN_ACCESS_KEY = "$2a$10$Kfk6adpy2bkyaPMTwzJPAO/byj6LP8TUcZRXuxHGXZ1/N9fsPDAGe"; 
         
         let API_URL = "";
         
@@ -568,12 +571,12 @@
             try {
                 statusText.innerText = "Đang tìm đường dẫn mã hóa mới nhất...";
                 
-                // Mặc định API URL nếu chưa thiết lập trạm gác thành công
-                let resolvedUrl = "https://demo-server.trycloudflare.com"; 
+                let resolvedUrl = ""; 
 
                 try {
+                    // Gọi lên Trạm Gác (JSONBIN) để lấy cái link mà Python vừa đẩy lên
                     const res = await fetch(JSONBIN_URL, {
-                        headers: { 'X-Access-Key': JSONBIN_ACCESS_KEY }
+                        headers: { 'X-Master-Key': JSONBIN_ACCESS_KEY }
                     });
                     
                     if (res.ok) {
@@ -581,13 +584,18 @@
                         if (data.record && data.record.latest_api_url) {
                             resolvedUrl = data.record.latest_api_url;
                         }
+                    } else {
+                        throw new Error(`Mã lỗi JSONBIN: ${res.status}`);
                     }
                 } catch(fetchError) {
-                    console.warn("Không thể kết nối trạm gác, sử dụng cấu hình mặc định.");
+                    console.error("Lỗi trạm gác:", fetchError);
+                    statusText.innerText = "Trạm gác phản hồi lỗi. Kiểm tra lại ID/Key!";
+                    // Dừng 2 giây cho người dùng thấy thông báo lỗi rồi mới vào trong
+                    await new Promise(r => setTimeout(r, 2000));
                 }
                 
                 API_URL = resolvedUrl;
-                if (API_URL.endsWith('/')) API_URL = API_URL.slice(0, -1);
+                if (API_URL && API_URL.endsWith('/')) API_URL = API_URL.slice(0, -1);
                 
                 console.log("Auto-connected to API:", API_URL);
                 
@@ -847,9 +855,40 @@
             }
         }
         
+        // HÀM TẢI XUỐNG AN TOÀN
         function downloadAudioFile() {
-            if(!livePlayerUI.src) return showToast("Không có file!", "error");
-            window.open(livePlayerUI.src, '_blank');
+            let urlToDownload = finalAudioUrl;
+            
+            if (!urlToDownload && livePlayerUI && livePlayerUI.src && livePlayerUI.src.includes('blob:')) {
+                urlToDownload = livePlayerUI.src;
+            }
+
+            if (!urlToDownload || urlToDownload === "" || urlToDownload === window.location.href) {
+                showToast("Chưa có file âm thanh để tải xuống!", "error");
+                return;
+            }
+
+            try {
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = urlToDownload;
+                a.download = `Xenari_Audio_${Date.now()}.wav`;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                setTimeout(() => {
+                    if (document.body.contains(a)) {
+                        document.body.removeChild(a);
+                    }
+                }, 150);
+                
+                showToast("Đang tải file âm thanh xuống máy...", "success");
+            } catch (e) {
+                console.error("Download fallback error:", e);
+                showToast("Trình duyệt chặn, đang mở qua tab mới...", "error");
+                window.open(urlToDownload, '_blank');
+            }
         }
     </script>
 </body>
